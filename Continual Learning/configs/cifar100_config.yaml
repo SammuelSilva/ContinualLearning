@@ -1,0 +1,101 @@
+# Configuration for CIFAR-100 Continual Learning with LoRA-ViT
+
+# Model Configuration
+model:
+  name: "vit_base_patch16_224"  # Can use: vit_tiny_patch16_224, vit_small_patch16_224, vit_base_patch16_224
+  hidden_dim: 768  # 192 for tiny, 384 for small, 768 for base
+  mlp_dim: 3072    # 768 for tiny, 1536 for small, 3072 for base
+  num_heads: 12    # 3 for tiny, 6 for small, 12 for base
+  num_layers: 12
+  use_pretrained: true
+
+# LoRA Configuration
+lora:
+  rank: 4  # Low rank for decomposition
+  alpha: 4.0  # Scaling factor
+  dropout: 0.1
+  config: "attention_only"  # Options: attention_only, ffn_only, both
+  target_modules:  # For attention_only config
+    - "q"  # Query projection
+    - "v"  # Value projection
+    # - "k"  # Key projection (optional)
+    # - "o"  # Output projection (optional)
+
+# Dataset Configuration
+dataset:
+  name: "CIFAR-100"
+  data_root: "./data"
+  num_tasks: 10
+  classes_per_task: 10
+  validation_split: 0.1
+  augmentation:
+    random_crop: true
+    random_flip: true
+    normalize: true
+
+# Training Configuration
+training:
+  batch_size: 128
+  num_epochs: 20
+  learning_rate: 1e-4
+  weight_decay: 0.01
+  optimizer: "AdamW"
+  scheduler: "cosine"
+  gradient_clip: 1.0
+  early_stopping:
+    patience: 5
+    min_delta: 0.001
+
+# Continual Learning Configuration
+continual:
+  lambda_unknown: 0.5  # Weight for unknown class loss
+  memory_buffer:
+    size: 2000
+    samples_per_class: 20
+    selection_strategy: "herding"  # Options: random, herding, uncertainty
+  task_prediction:
+    use_unknown_class: true
+    temperature: 1.0
+
+# Experiment Configuration
+experiment:
+  seed: 42
+  device: "cuda"
+  num_workers: 4
+  save_dir: "./results"
+  checkpoint_freq: 5  # Save checkpoint every N epochs
+  log_wandb: false  # Set to true to use Weights & Biases
+  wandb_project: "continual-lora-vit"
+  wandb_entity: null
+
+# Evaluation Configuration
+evaluation:
+  metrics:
+    - "accuracy"
+    - "forgetting"
+    - "forward_transfer"
+    - "backward_transfer"
+  save_predictions: false
+  confusion_matrix: true
+
+# Hypothesis Testing Configurations
+ablation_configs:
+  attention_only:
+    description: "Test 'what' hypothesis - attention adapts to objects"
+    lora_config: "attention_only"
+    target_modules: ["q", "v"]
+    
+  ffn_only:
+    description: "Test 'how' hypothesis - FFN adapts representation"
+    lora_config: "ffn_only"
+    target_modules: ["fc1", "fc2"]
+    
+  both:
+    description: "Combined adaptation"
+    lora_config: "both"
+    target_modules: ["q", "v", "fc1", "fc2"]
+    
+  minimal:
+    description: "Minimal adaptation - Q only"
+    lora_config: "attention_only"
+    target_modules: ["q"]
