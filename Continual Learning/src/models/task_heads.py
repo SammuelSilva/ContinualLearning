@@ -33,7 +33,11 @@ class TaskHead(nn.Module):
         # Initialize
         nn.init.normal_(self.classifier.weight, std=0.02)
         nn.init.zeros_(self.classifier.bias)
-    
+
+        if torch.cuda.is_available():
+            device = torch.device('cuda:0')
+            self.to(device)
+            
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         """Forward pass through classification head"""
         x = self.dropout(features)

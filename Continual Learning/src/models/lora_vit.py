@@ -9,8 +9,8 @@ from typing import Dict, List, Optional, Tuple
 import timm
 from timm.models.vision_transformer import VisionTransformer, Attention, Mlp
 from functools import partial
-from .lora_layers import LoRALayer, TaskSpecificLoRA
-from .task_heads import TaskHead
+from src.models.lora_layers import LoRALayer, TaskSpecificLoRA
+from src.models.task_heads import TaskHead
 
 
 class LoRAAttention(nn.Module):
@@ -28,6 +28,11 @@ class LoRAAttention(nn.Module):
         target_modules: List[str] = ["q", "v"]
     ):
         super().__init__()
+
+        if torch.cuda.is_available():
+            device = torch.device('cuda:0')
+            self.to(device)
+
         self.original_attn = original_attn
         self.hidden_dim = hidden_dim
         
@@ -102,6 +107,11 @@ class LoRAMlp(nn.Module):
         lora_dropout: float = 0.1
     ):
         super().__init__()
+
+        if torch.cuda.is_available():
+            device = torch.device('cuda:0')
+            self.to(device)
+
         self.original_mlp = original_mlp
         
         # LoRA for FC layers
@@ -126,138 +136,6 @@ class LoRAMlp(nn.Module):
         h = self.original_mlp.drop2(h)
         
         return h
-
-
-"""
-Proper LoRA-ViT implementation with actual integration into transformer layers.
-This version properly hooks into the ViT architecture to apply LoRA adapters.
-"""
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import Dict, List, Optional, Tuple
-import timm
-from timm.models.vision_transformer import VisionTransformer, Attention, Mlp
-from functools import partial
-from .lora_layers import LoRALayer, TaskSpecificLoRA
-from .task_heads import TaskHead
-
-
-class LoRAAttention(nn.Module):
-    """
-    Modified Attention module with LoRA adapters.
-    Wraps the original attention module and adds LoRA to Q, K, V projections.
-    """
-    def __init__(
-        self, 
-        original_attn: Attention,
-        hidden_dim: int,
-        lora_rank: int = 4,
-        lora_alpha: float = 1.0,
-        lora_dropout: float = 0.1,
-        target_modules: List[str] = ["q", "v"]
-    ):
-        super().__init__()
-        self.original_attn = original_attn
-        self.hidden_dim = hidden_dim
-        
-        # Create LoRA adapters for specified targets
-        self.lora_adapters = nn.ModuleDict()
-        
-        if "q" in target_modules:
-            self.lora_adapters["q"] = LoRALayer(
-                hidden_dim, hidden_dim, lora_rank, lora_alpha, lora_dropout
-            )
-        if "k" in target_modules:
-            self.lora_adapters["k"] = LoRALayer(
-                hidden_dim, hidden_dim, lora_rank, lora_alpha, lora_dropout
-            )
-        if "v" in target_modules:
-            self.lora_adapters["v"] = LoRALayer(
-                hidden_dim, hidden_dim, lora_rank, lora_alpha, lora_dropout
-            )
-            
-    def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        B, N, C = x.shape
-        
-        # Get Q, K, V from original attention
-        qkv = self.original_attn.qkv(x).reshape(B, N, 3, self.original_attn.num_heads, C // self.original_attn.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)  # B, num_heads, N, head_dim
-        
-        # Apply LoRA adapters if present
-        if "q" in self.lora_adapters:
-            q_adapt = self.lora_adapters["q"](x)  # B, N, C
-            q_adapt = q_adapt.reshape(B, N, self.original_attn.num_heads, C // self.original_attn.num_heads).permute(0, 2, 1, 3)
-            q = q + q_adapt
-            
-        if "k" in self.lora_adapters:
-            k_adapt = self.lora_adapters["k"](x)
-            k_adapt = k_adapt.reshape(B, N, self.original_attn.num_heads, C // self.original_attn.num_heads).permute(0, 2, 1, 3)
-            k = k + k_adapt
-            
-        if "v" in self.lora_adapters:
-            v_adapt = self.lora_adapters["v"](x)
-            v_adapt = v_adapt.reshape(B, N, self.original_attn.num_heads, C // self.original_attn.num_heads).permute(0, 2, 1, 3)
-            v = v + v_adapt
-        
-        # Compute attention
-        attn = (q @ k.transpose(-2, -1)) * self.original_attn.scale
-        
-        # Apply attention mask if provided
-        if attn_mask is not None:
-            attn = attn + attn_mask
-            
-        attn = attn.softmax(dim=-1)
-        attn = self.original_attn.attn_drop(attn)
-        
-        # Apply to values and project
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.original_attn.proj(x)
-        x = self.original_attn.proj_drop(x)
-        
-        return x
-
-
-class LoRAMlp(nn.Module):
-    """
-    Modified MLP module with LoRA adapters for FFN layers.
-    """
-    def __init__(
-        self,
-        original_mlp: Mlp,
-        hidden_dim: int,
-        mlp_dim: int,
-        lora_rank: int = 4,
-        lora_alpha: float = 1.0,
-        lora_dropout: float = 0.1
-    ):
-        super().__init__()
-        self.original_mlp = original_mlp
-        
-        # LoRA for FC layers
-        self.lora_fc1 = LoRALayer(
-            hidden_dim, mlp_dim, lora_rank, lora_alpha, lora_dropout
-        )
-        self.lora_fc2 = LoRALayer(
-            mlp_dim, hidden_dim, lora_rank, lora_alpha, lora_dropout
-        )
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # First FC layer with LoRA
-        h = self.original_mlp.fc1(x)
-        h = h + self.lora_fc1(x)
-        h = self.original_mlp.act(h)
-        h = self.original_mlp.drop1(h)
-        
-        # Second FC layer with LoRA
-        h_pre = h
-        h = self.original_mlp.fc2(h)
-        h = h + self.lora_fc2(h_pre)
-        h = self.original_mlp.drop2(h)
-        
-        return h
-
 
 class ContinualLoRAViT(nn.Module):
     """
@@ -584,3 +462,33 @@ class ContinualLoRAViT(nn.Module):
         params.extend(self.task_adapters[self.current_task].parameters())
         params.extend(self.task_heads[self.current_task].parameters())
         return params
+    
+    def save_task_checkpoint(self, task_id: str, path: str):
+        checkpoint = {
+            'task_id': task_id,
+            'adapter_state': self.task_adapters[task_id].state_dict(),
+            'head_state': self.task_heads[task_id].state_dict(),
+            'num_classes': self.task_classes[task_id],
+            'lora_config': self.lora_config,
+            'lora_rank': self.lora_rank,
+            'lora_alpha': self.lora_alpha
+        }
+        torch.save(checkpoint, path)
+
+    def load_task_checkpoint(self, task_id: str, path: str):
+        checkpoint = torch.load(path)
+
+        if task_id not in self.task_adapters:
+            self.add_task(task_id, checkpoint['num_classes'])
+        
+        self.task_adapters[task_id].load_state_dict(checkpoint['adapter_state'])
+        self.task_heads[task_id].load_state_dict(checkpoint['head_state'])
+    
+    def freeze_previous_tasks(self):
+        for task_id in self.task_adapters.keys():
+            if task_id != self.current_task:
+                for param in self.task_adapters[task_id].parameters():
+                    param.requires_grad = False
+                for param in self.task_heads[task_id].parameters():
+                    param.requires_grad = False
+

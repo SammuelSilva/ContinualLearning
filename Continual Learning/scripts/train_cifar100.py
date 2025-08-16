@@ -247,6 +247,8 @@ def main():
         lora_config=args.lora_config,
         use_pretrained=True
     )
+
+    model.to(device) 
     
     # Create memory buffer
     print("Initializing memory buffer...")

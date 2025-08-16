@@ -38,6 +38,10 @@ class LoRALayer(nn.Module):
 
         self.merged = False
     
+        if torch.cuda.is_available():
+            device = torch.device('cuda:0')
+            self.to(device)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the LoRA layer."""
         if not self.merged:
@@ -91,7 +95,10 @@ class MultiHeadLoRAAdapter(nn.Module):
             self.lora_modules["o"] = LoRALayer(
                 hidden_dim, hidden_dim, rank, alpha, dropout
             )
-    
+            
+        if torch.cuda.is_available():
+            device = torch.device('cuda:0')
+            self.to(device)
     def forward(
         self, 
         q: Optional[torch.Tensor] = None,
@@ -134,6 +141,10 @@ class FFNLoRAAdapter(nn.Module):
         # LoRA for both FC layers in FFN
         self.lora_fc1 = LoRALayer(hidden_dim, mlp_dim, rank, alpha, dropout)
         self.lora_fc2 = LoRALayer(mlp_dim, hidden_dim, rank, alpha, dropout)
+
+        if torch.cuda.is_available():
+            device = torch.device('cuda:0')
+            self.to(device)
         
     def forward(
         self,
@@ -195,7 +206,11 @@ class TaskSpecificLoRA(nn.Module):
                 )
             else:
                 self.ffn_adapters.append(None)
-    
+
+        if torch.cuda.is_available():
+            device = torch.device('cuda:0')
+            self.to(device)
+
     def get_layer_adapters(self, layer_idx: int):
         """Get adapters for a specific layer"""
         return {

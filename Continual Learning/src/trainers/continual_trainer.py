@@ -199,7 +199,7 @@ class ContinualTrainer:
                 logits = self.model(images, task_id=task_id)
                 
                 # Compute loss (only current task)
-                loss = F.cross_entropy(logits[:, :-1], labels)
+                loss = torch.nn.functional.cross_entropy(logits[:, :-1], labels)
                 total_loss += loss.item()
                 
                 # Compute accuracy
