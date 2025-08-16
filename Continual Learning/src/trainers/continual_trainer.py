@@ -43,7 +43,8 @@ class ContinualTrainer:
         
         # Metrics tracker
         self.metrics = ContinualMetrics(num_tasks=10)
-        
+        self.current_task_idx = 0
+
         # Create save directory
         os.makedirs(save_dir, exist_ok=True)
     
@@ -53,12 +54,16 @@ class ContinualTrainer:
         train_loader: DataLoader,
         val_loader: DataLoader,
         num_epochs: int = 20,
-        patience: int = 5
+        patience: int = 5,
+        task_idx: int = None
     ):
         """Train model on a single task"""
         
         print(f"\n=== Training Task {task_id} ===")
         
+        if task_idx is not None:
+            self.current_task_idx = task_idx
+
         # Set active task
         self.model.set_active_task(task_id)
         
@@ -299,6 +304,36 @@ class ContinualTrainer:
         
         # Compute average accuracy
         avg_accuracy = np.mean(list(results.values()))
+        all_metrics = self.metrics.compute_all_metrics(after_task=self.current_task_idx)
         print(f"Average Accuracy: {avg_accuracy:.2f}%")
+        print(f"\n--- Continual Learning Metrics ---")
+        print(f"Average Accuracy: {all_metrics['average_accuracy']:.2f}%")
+        print(f"Average Forgetting: {all_metrics['average_forgetting']:.2f}%")
+        print(f"Backward Transfer: {all_metrics['backward_transfer']:.2f}%")
+        print(f"Forward Transfer: {all_metrics['forward_transfer']:.2f}%")
+        print(f"Plasticity: {all_metrics['plasticity']:.2f}%")
+        print(f"Stability: {all_metrics['stability']:.2f}")
         
         return results
+    
+    def get_metrics_summary(self) -> Dict:
+        """Get comprehensive metrics summary"""
+        return self.metrics.compute_all_metrics()
+    
+    def save_metrics(self, save_path: str):
+        """Save metrics to file"""
+        self.metrics.save_metrics(save_path)
+    
+    def plot_metrics(self, save_dir: str):
+        """Generate and save metric plots"""
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Plot accuracy matrix
+        matrix_path = os.path.join(save_dir, 'accuracy_matrix.png')
+        self.metrics.plot_accuracy_matrix(matrix_path)
+        
+        # Plot metrics evolution
+        evolution_path = os.path.join(save_dir, 'metrics_evolution.png')
+        self.metrics.plot_metrics_evolution(evolution_path)
+        
+        print(f"Metric plots saved to {save_dir}")
