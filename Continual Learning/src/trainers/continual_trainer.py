@@ -31,6 +31,7 @@ class ContinualTrainer:
         learning_rate: float = 1e-4,
         weight_decay: float = 0.01,
         lambda_unknown: float = 0.5,
+        num_tasks: int = 10,
         save_dir: str = "./checkpoints"
     ):
         self.model = model.to(device)
@@ -42,7 +43,7 @@ class ContinualTrainer:
         self.save_dir = save_dir
         
         # Metrics tracker
-        self.metrics = ContinualMetrics(num_tasks=10)
+        self.metrics = ContinualMetrics(num_tasks)
         self.current_task_idx = 0
 
         # Create save directory
