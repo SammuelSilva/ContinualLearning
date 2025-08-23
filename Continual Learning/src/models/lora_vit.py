@@ -56,8 +56,8 @@ class LoRAAttention(nn.Module):
         B, N, C = x.shape
         
         # Get Q, K, V from original attention
-        qkv = self.original_attn.qkv(x).reshape(B, N, 3, self.original_attn.num_heads, C // self.original_attn.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)  # B, num_heads, N, head_dim
+        self.qkv = self.original_attn.qkv(x).reshape(B, N, 3, self.original_attn.num_heads, C // self.original_attn.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = self.qkv.unbind(0)  # B, num_heads, N, head_dim
         
         # Apply LoRA adapters if present
         if "q" in self.lora_adapters:

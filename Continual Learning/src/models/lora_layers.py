@@ -182,7 +182,13 @@ class TaskSpecificLoRA(nn.Module):
         super().__init__()
         self.num_layers = num_layers
         self.lora_config = lora_config
-        
+        self.hidden_dim = hidden_dim
+        self.mlp_dim = mlp_dim
+        self.num_heads = num_heads
+        self.rank = rank
+        self.alpha = alpha
+        self.dropout = dropout
+
         # Create LoRA adapters for each transformer layer
         self.attention_adapters = nn.ModuleList()
         self.ffn_adapters = nn.ModuleList()
