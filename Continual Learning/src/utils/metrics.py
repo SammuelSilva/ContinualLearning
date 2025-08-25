@@ -5,10 +5,11 @@ Includes accuracy, forgetting, forward/backward transfer metrics.
 
 import numpy as np
 import torch
-from typing import Dict, List, Optional, Tuple
-from collections import defaultdict
 import matplotlib.pyplot as plt
 import seaborn as sns
+from typing import Dict, List, Optional, Tuple
+from collections import defaultdict
+from src.utils.helpers import NumpyJSONEncoder
 
 
 class ContinualMetrics:
@@ -372,6 +373,6 @@ class ContinualMetrics:
         }
         
         with open(save_path, 'w') as f:
-            json.dump(data, f, indent=4)
+            json.dump(data, f, indent=4, cls=NumpyJSONEncoder)
         
         print(f"Metrics saved to: {save_path}")

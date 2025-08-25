@@ -13,7 +13,8 @@ from typing import Dict, List, Optional, Tuple
 from tqdm import tqdm
 from src.trainers.continual_trainer import ContinualTrainer
 from src.models.hierarchical_lora import HierarchicalLoRAViT
-from src.utils.visualization import HierarchicalVisualizer
+from src.utils.visualization import HierarchicalVisualizer, MetricsAnimator
+from src.models.orthogonal_utils import compute_orthogonality_score
 
 
 class HierarchicalTrainer(ContinualTrainer):
@@ -46,15 +47,21 @@ class HierarchicalTrainer(ContinualTrainer):
         
         self.lambda_block_unknown = lambda_block_unknown
         self.visualizer = HierarchicalVisualizer(save_dir)
-        
+        self.animator = MetricsAnimator()
+        self.num_tasks = num_tasks
         # Track block-level metrics
         self.block_metrics = {
             'block_accuracy': [],
             'block_confusion': [],
             'orthogonality_scores': []
         }
-        if torch.cuda.is_available():
-            self.to(torch.device('cuda:0'))
+        self.memory_buffer=memory_buffer
+        self.device=device
+        self.learning_rate=learning_rate
+        self.weight_decay=weight_decay
+        self.lambda_unknown=lambda_task_unknown
+        self.save_dir=save_dir
+
 
     def compute_hierarchical_loss(
         self,
@@ -273,7 +280,7 @@ class HierarchicalTrainer(ContinualTrainer):
         train_loader: DataLoader,
         val_loader: DataLoader,
         num_epochs: int = 20,
-        patience: int = 5,
+        patience: int = 3,
         task_idx: Optional[int] = None
     ):
         """
@@ -342,8 +349,6 @@ class HierarchicalTrainer(ContinualTrainer):
         
         # Compute and store orthogonality score
         if len(self.model.active_block_tasks) > 1:
-            from src.models.orthogonal_utils import compute_orthogonality_score
-            
             adapters = [
                 self.model.task_adapters[tid]
                 for tid in self.model.active_block_tasks.keys()
@@ -355,20 +360,16 @@ class HierarchicalTrainer(ContinualTrainer):
         # Visualize if end of block
         if len(self.model.active_block_tasks) == self.model.tasks_per_block:
             self._visualize_block_completion()
-        
-            from src.utils.visualization import HierarchicalVisualizer, MetricsAnimator
-    
-        visualizer = HierarchicalVisualizer(save_dir=self.save_dir)
-        
+                
         # Plot hierarchy tree
         hierarchy_stats = self.model.get_statistics()
-        visualizer.plot_hierarchy_tree(
+        self.visualizer.plot_hierarchy_tree(
             hierarchy_stats,
             save_path=f"{self.save_dir}/hierarchy_task_{task_idx}.html"
         )
     
         # Plot memory efficiency
-        visualizer.plot_memory_efficiency(
+        self.visualizer.plot_memory_efficiency(
             num_tasks=task_idx + 1,
             tasks_per_block=self.model.tasks_per_block,
             lora_rank=self.model.lora_rank,
@@ -377,22 +378,21 @@ class HierarchicalTrainer(ContinualTrainer):
         
         # Plot orthogonality matrix if we have multiple tasks
         if len(self.model.task_adapters) > 1:
-            visualizer.plot_orthogonality_matrix(
+            self.visualizer.plot_orthogonality_matrix(
                 self.model.task_adapters,
                 save_path=f"{self.save_dir}/orthogonality_task_{task_idx}.png"
             )
         
         # Create training dashboard at the end
         if task_idx == self.num_tasks - 1:
-            visualizer.create_training_dashboard(
+            self.visualizer.create_training_dashboard(
                 metrics_history=self.metrics.training_history,
                 hierarchy_stats=hierarchy_stats,
                 save_path=f"{self.save_dir}/final_dashboard.html"
             )
             
             # Create accuracy animation
-            animator = MetricsAnimator()
-            animator.create_accuracy_animation(
+            self.animator.create_accuracy_animation(
                 self.metrics.accuracy_matrix,
                 save_path=f"{self.save_dir}/accuracy_evolution.gif"
             )

@@ -24,8 +24,8 @@ from src.data.memory_buffer import MemoryBuffer
 from src.trainers.hierarchical_trainer import HierarchicalTrainer
 from src.trainers.continual_trainer import ContinualTrainer
 from src.utils.visualization import HierarchicalVisualizer
-from src.models.merge_strategies import AdaptiveMergeStrategy, ProgressiveMergeScheduler
-
+from src.models.merge_strategies import AdaptiveMergeStrategy, ProgressiveMergeScheduler    
+from src.utils.helpers import NumpyJSONEncoder
 
 def setup_logging(experiment_dir: str):
     """Setup logging configuration"""
@@ -428,7 +428,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
     
     results_path = os.path.join(args.experiment_dir, 'final_results.json')
     with open(results_path, 'w') as f:
-        json.dump(results, f, indent=4)
+        json.dump(results, f, indent=4, cls=NumpyJSONEncoder)
     
     # Print summary
     print_summary(final_metrics, final_results, args)
@@ -567,7 +567,7 @@ def save_checkpoint_state(experiment_dir, task_idx, task_accuracies, metrics):
     
     state_path = os.path.join(experiment_dir, 'training_state.json')
     with open(state_path, 'w') as f:
-        json.dump(state, f, indent=4)
+        json.dump(state, f, indent=4, cls=NumpyJSONEncoder)
 
 
 def load_checkpoint_state(experiment_dir):
@@ -708,7 +708,7 @@ def main(args=None):
     # Save configuration
     config_path = os.path.join(args.experiment_dir, 'config.json')
     with open(config_path, 'w') as f:
-        json.dump(vars(args), f, indent=4)
+        json.dump(vars(args), f, indent=4, cls=NumpyJSONEncoder)
     
     # Setup device
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')

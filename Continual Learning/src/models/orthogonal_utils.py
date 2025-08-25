@@ -16,10 +16,6 @@ class OrthogonalProjector:
     Manages orthogonal projection of LoRA adapters.
     """
 
-    def __init__(self):
-        if torch.cuda.is_available():
-            self.to(torch.device('cuda:0'))
-
     @staticmethod
     def extract_lora_layers(adapters: List) -> List[LoRALayer]:
         """
