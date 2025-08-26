@@ -781,7 +781,6 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                         best_task = min(task_unknown_probs, key=task_unknown_probs.get)
                         print(f"DEBUG: Task_unknown_probs {task_unknown_probs}")
                         predicted_tasks.append(best_task)
-                        print(f"DEBUG: Predicted_tasks {predicted_tasks}")
                         task_confidences.append(1 - task_unknown_probs[best_task])
                     else:
                         # Fallback
