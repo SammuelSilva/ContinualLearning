@@ -198,8 +198,6 @@ class OrthogonalLoRAMerger:
         """
         self.merge_strategy = merge_strategy
         self.projector = OrthogonalProjector()
-        if torch.cuda.is_available():
-            self.to(torch.device('cuda:0'))
     
     def merge_adapters(
         self,
