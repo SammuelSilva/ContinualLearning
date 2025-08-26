@@ -287,7 +287,7 @@ class ContinualTrainer:
         for task_id, test_loader in test_loaders.items():
             correct = 0
             total = 0
-            
+            print(f"DEBUG: Continual Trainer Evaluating task_{task_id}")
             with torch.no_grad():
                 for images, labels in test_loader:
                     images = images.to(self.device)

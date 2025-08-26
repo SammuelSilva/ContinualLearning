@@ -56,7 +56,12 @@ class OrthogonalMergedBlock(nn.Module):
         
         # Store original task adapters (frozen)
         self.task_adapters = nn.ModuleDict(task_adapters)
-        self.task_heads = nn.ModuleDict(task_heads)
+
+        self.task_heads = nn.ModuleDict()
+        for task_id, head in task_heads.items():
+            self.task_heads[task_id] = head
+            print(f"DEBUG: Added head for {task_id} to merged block")
+            
         self.task_ids = list(task_adapters.keys())
         self.task_to_index = {tid: i for i, tid in enumerate(self.task_ids)}
         
@@ -507,12 +512,19 @@ class OrthogonalMergedBlock(nn.Module):
         
         task_id = self.task_ids[task_index]
         
+        print(f"DEBUG: forward_task for {task_id} (index {task_index})")
         # Get features with task-specific LoRA
         features = self.forward_with_backbone(x, backbone, task_id)
         
         # Apply task-specific head
-        logits = self.task_heads[task_id](features)
-        
+        task_head = self.get_task_head(task_id)
+        if task_head is not None:
+            logits = self.task_heads[task_id](features)
+            print(f"DEBUG: Logits shape for task {task_id}: {logits.shape}, max: {logits.max().item()}")
+        else:
+            print(f"ERROR: No task head found for task {task_id}")
+            logits = torch.zeros(x.shape[0], 11, device=x.device)
+
         return logits
     
     def forward_all(self, x: torch.Tensor, backbone: nn.Module) -> torch.Tensor:
@@ -727,14 +739,18 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
             # Step 2: Task-level prediction within selected blocks
             predicted_tasks = []
             task_confidences = []
-            
+            flag = True
             for i in range(batch_size):
                 if block_confidences:
                     block_idx = block_indices[i].item()
                 else:
                     block_idx = 0
-            
+                print(f"DEBUG: block {block_idx} < {len(self.merged_blocks)}")
                 if block_idx < len(self.merged_blocks):
+                    if flag:
+                        print(f"DEBUG: task in block {block_idx}")
+                        flag = False
+
                     # Task is in a merged block
                     block = self.merged_blocks[block_idx]
                     
@@ -753,6 +769,9 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                     if self.active_block_tasks:
                         task_unknown_probs = {}
                         for task_id in self.active_block_tasks.keys():
+                            if flag:
+                                print(f"DEBUG: Task {task_id} is in active block")
+                                flag = False
                             logits = self.forward(x[i:i+1], task_id=task_id)
                             probs = F.softmax(logits, dim=-1)
                             task_unknown_probs[task_id] = probs[0, -1].item()
@@ -762,6 +781,7 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                         task_confidences.append(1 - task_unknown_probs[best_task])
                     else:
                         # Fallback
+                        print("DEBUG: Fallback.")
                         predicted_tasks.append("task_0")
                         task_confidences.append(0.0)
             

@@ -235,6 +235,7 @@ class HierarchicalTrainer(ContinualTrainer):
             total = 0
             block_correct = 0
             
+            print(f"DEBUG: Hierarchical Trainer in taks {true_task_id}")
             with torch.no_grad():
                 for images, labels in test_loader:
                     images = images.to(self.device)
