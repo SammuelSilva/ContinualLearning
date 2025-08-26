@@ -768,16 +768,20 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                     # Task is in active block
                     if self.active_block_tasks:
                         task_unknown_probs = {}
+                        flag = -1
                         for task_id in self.active_block_tasks.keys():
-                            if flag:
+                            
+                            if flag != task_id:
                                 print(f"DEBUG: Task {task_id} is in active block")
-                                flag = False
+                                flag = task_id
                             logits = self.forward(x[i:i+1], task_id=task_id)
                             probs = F.softmax(logits, dim=-1)
                             task_unknown_probs[task_id] = probs[0, -1].item()
                         
                         best_task = min(task_unknown_probs, key=task_unknown_probs.get)
+                        print(f"DEBUG: Task_unknown_probs {task_unknown_probs}")
                         predicted_tasks.append(best_task)
+                        print(f"DEBUG: Predicted_tasks {predicted_tasks}")
                         task_confidences.append(1 - task_unknown_probs[best_task])
                     else:
                         # Fallback
