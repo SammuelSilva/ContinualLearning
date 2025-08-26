@@ -170,7 +170,8 @@ class HierarchicalTrainer(ContinualTrainer):
                     all_samples.append(task_samples['images'])
         
         if all_samples:
-            return torch.cat(all_samples, dim=0)[:batch_size]
+            samples = torch.cat(all_samples, dim=0)[:batch_size]
+            return samples.to(self.device)
         return None
     
     def _compute_intra_block_regularization(
