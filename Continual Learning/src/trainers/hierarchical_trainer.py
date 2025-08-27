@@ -429,7 +429,6 @@ class HierarchicalTrainer(ContinualTrainer):
                     batch_size=min(32, len(images))
                 )
                 if len(memory_batch['images']) > 0:
-                    print("DEBUG: memory batch size ", len(memory_batch['images']))
                     memory_batch['images'] = memory_batch['images'].to(self.device)
             
             # Compute hierarchical loss

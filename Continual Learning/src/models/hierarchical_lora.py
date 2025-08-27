@@ -763,7 +763,6 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                     # Task is in active block
                     if self.active_block_tasks:
                         task_unknown_probs = {}
-                        print(f"DEBUG: Tasks in active block: {self.active_block_tasks.keys()}")
                         for task_id in self.active_block_tasks.keys():
                             logits = self.forward(x[i:i+1], task_id=task_id)
                             probs = F.softmax(logits, dim=-1)
@@ -778,7 +777,6 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                         predicted_tasks.append("task_0")
                         task_confidences.append(0.0)
 
-            print(f"DEBUG: Task_unknown_probs {task_confidences}")
             task_confidences = torch.tensor(task_confidences, device=x.device)
     
         return predicted_tasks, task_confidences
