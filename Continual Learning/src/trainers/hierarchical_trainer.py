@@ -582,64 +582,64 @@ class HierarchicalTrainer(ContinualTrainer):
         
         print(f"Buffer updated. Current size: {len(self.memory_buffer)}")
 
-def align_ood_detection(self, memory_buffer, num_epochs=5):
-    """
-    OOD Detection Alignment - matching paper's equation (3)
-    """
-    # Get memory data
-    all_memory_data = memory_buffer.get_all_data()
-    if len(all_memory_data['images']) == 0:
-        return
-    
-    # Only train classification heads
-    head_params = []
-    for task_id in self.model.task_heads.keys():
-        for param in self.model.task_heads[task_id].parameters():
-            param.requires_grad = True
-            head_params.append(param)
-    
-    optimizer = torch.optim.Adam(head_params, lr=1e-4)
-    
-    # Pre-compute features once
-    with torch.no_grad():
-        features = self.model.backbone(all_memory_data['images'].to(self.device))
-    
-    for epoch in range(num_epochs):
-        optimizer.zero_grad()
-        total_loss = 0
-        num_terms = 0
+    def align_ood_detection(self, memory_buffer, num_epochs=5):
+        """
+        OOD Detection Alignment - matching paper's equation (3)
+        """
+        # Get memory data
+        all_memory_data = memory_buffer.get_all_data()
+        if len(all_memory_data['images']) == 0:
+            return
         
-        # For each task head h_j
-        for task_j in self.model.task_heads.keys():
-            # Get task j's class indices
-            task_j_classes = set()
-            for i, tid in enumerate(all_memory_data['task_ids']):
-                if tid == task_j:
-                    task_j_classes.add(all_memory_data['labels'][i].item())
-            
-            # Forward all samples through head h_j
-            logits = self.model.task_heads[task_j](features)
-            
-            # Create labels according to equation (3)
-            labels = []
-            for i, (label, task_id) in enumerate(zip(all_memory_data['labels'], all_memory_data['task_ids'])):
-                if task_id == task_j:
-                    # x_i ∈ D_j: use actual label (adjusted for task-local indexing)
-                    labels.append(label.item() % self.model.task_classes[task_j])
-                else:
-                    # x_i ∉ D_j: use unknown class (C_j + 1)
-                    labels.append(self.model.task_classes[task_j])  # This is the unknown index
-            
-            labels = torch.tensor(labels, device=self.device)
-            
-            # Compute loss for this head
-            loss_j = F.cross_entropy(logits, labels)
-            total_loss += loss_j
-            num_terms += 1
+        # Only train classification heads
+        head_params = []
+        for task_id in self.model.task_heads.keys():
+            for param in self.model.task_heads[task_id].parameters():
+                param.requires_grad = True
+                head_params.append(param)
         
-        # Average over all heads (as in equation 3: 1/|M_t| sum over heads)
-        avg_loss = total_loss / num_terms
-        avg_loss.backward()
-        optimizer.step()
+        optimizer = torch.optim.Adam(head_params, lr=1e-4)
         
-        print(f"Alignment Epoch {epoch+1}/{num_epochs}: Loss = {avg_loss.item():.4f}")
+        # Pre-compute features once
+        with torch.no_grad():
+            features = self.model.backbone(all_memory_data['images'].to(self.device))
+        
+        for epoch in range(num_epochs):
+            optimizer.zero_grad()
+            total_loss = 0
+            num_terms = 0
+            
+            # For each task head h_j
+            for task_j in self.model.task_heads.keys():
+                # Get task j's class indices
+                task_j_classes = set()
+                for i, tid in enumerate(all_memory_data['task_ids']):
+                    if tid == task_j:
+                        task_j_classes.add(all_memory_data['labels'][i].item())
+                
+                # Forward all samples through head h_j
+                logits = self.model.task_heads[task_j](features)
+                
+                # Create labels according to equation (3)
+                labels = []
+                for i, (label, task_id) in enumerate(zip(all_memory_data['labels'], all_memory_data['task_ids'])):
+                    if task_id == task_j:
+                        # x_i ∈ D_j: use actual label (adjusted for task-local indexing)
+                        labels.append(label.item() % self.model.task_classes[task_j])
+                    else:
+                        # x_i ∉ D_j: use unknown class (C_j + 1)
+                        labels.append(self.model.task_classes[task_j])  # This is the unknown index
+                
+                labels = torch.tensor(labels, device=self.device)
+                
+                # Compute loss for this head
+                loss_j = F.cross_entropy(logits, labels)
+                total_loss += loss_j
+                num_terms += 1
+            
+            # Average over all heads (as in equation 3: 1/|M_t| sum over heads)
+            avg_loss = total_loss / num_terms
+            avg_loss.backward()
+            optimizer.step()
+            
+            print(f"Alignment Epoch {epoch+1}/{num_epochs}: Loss = {avg_loss.item():.4f}")
