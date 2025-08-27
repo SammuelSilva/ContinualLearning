@@ -602,13 +602,7 @@ class HierarchicalTrainer(ContinualTrainer):
         with torch.no_grad():
             for i in range(0, len(alignment_data['images']), batch_size):
                 batch_images = alignment_data['images'][i:i+batch_size]
-                
-                # Use gradient checkpointing for memory efficiency (Strategy 3)
-                if hasattr(self, '_forward_with_checkpointing'):
-                    features = self._forward_with_checkpointing(batch_images)
-                else:
-                    features = self.model.backbone(batch_images)
-                
+                features = self.model.backbone(batch_images)
                 all_features.append(features.cpu())  # Keep on CPU
         
         all_features = torch.cat(all_features, dim=0)
@@ -710,38 +704,3 @@ class HierarchicalTrainer(ContinualTrainer):
         subset['labels'] = torch.tensor(subset['labels']) if subset['labels'] else torch.tensor([])
         
         return subset
-
-    def _forward_with_checkpointing(self, x):
-        """
-        Forward pass with gradient checkpointing (Strategy 3)
-        """        
-        # Initial embedding
-        x = self.model.backbone.patch_embed(x)
-        x = x + self.model.backbone.pos_embed
-        x = self.model.backbone.pos_drop(x)
-        
-        # Process blocks with checkpointing
-        def run_blocks(x, start, end):
-            for i in range(start, end):
-                x = self.model.backbone.blocks[i](x)
-            return x
-        
-        # Checkpoint every 3 blocks
-        num_blocks = len(self.model.backbone.blocks)
-        for i in range(0, num_blocks, 3):
-            end = min(i + 3, num_blocks)
-            if self.training:
-                x = checkpoint(run_blocks, x, i, end)
-            else:
-                x = run_blocks(x, i, end)
-        
-        # Final norm
-        x = self.model.backbone.norm(x)
-        
-        # Extract class token or average pool
-        if hasattr(self.model.backbone, 'fc_norm'):
-            x = self.model.backbone.fc_norm(x.mean(1))
-        else:
-            x = x[:, 0]  # class token
-        
-        return x
