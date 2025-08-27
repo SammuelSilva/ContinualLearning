@@ -145,6 +145,10 @@ class HierarchicalTrainer(ContinualTrainer):
         if 'intra_block_reg' in losses:
             total_loss += 0.1 * losses['intra_block_reg']
         
+        if 'task_unknown' in losses:
+            print(f"OOD Training: Task {task_id} learning to reject {len(memory_batch['images'])} samples from previous tasks")
+            print(f"Unknown loss: {losses['task_unknown'].item():.4f}")
+
         losses['total'] = total_loss
         return losses
     
@@ -235,7 +239,7 @@ class HierarchicalTrainer(ContinualTrainer):
             total = 0
             block_correct = 0
             
-            print(f"DEBUG: Hierarchical Trainer in taks {true_task_id}")
+            print(f"DEBUG: Hierarchical Trainer in task {true_task_id}")
             with torch.no_grad():
                 for images, labels in test_loader:
                     images = images.to(self.device)
@@ -267,7 +271,7 @@ class HierarchicalTrainer(ContinualTrainer):
             results['task_accuracy'][true_task_id] = accuracy
             
             print(f"Task {true_task_id}: {accuracy:.2f}% (Hierarchical)")
-        
+
         # Compute block-level metrics
         results['avg_task_accuracy'] = np.mean(list(results['task_accuracy'].values()))
         
@@ -322,6 +326,7 @@ class HierarchicalTrainer(ContinualTrainer):
             train_loss, train_acc = self._train_epoch_hierarchical(
                 train_loader, optimizer, task_id
             )
+            
             
             # Validation
             val_loss, val_acc = self._validate(val_loader, task_id)
@@ -425,10 +430,10 @@ class HierarchicalTrainer(ContinualTrainer):
             memory_batch = None
             if len(self.memory_buffer) > 0:
                 memory_batch = self.memory_buffer.sample(
-                    batch_size=min(32, len(images)),
-                    exclude_task=task_id
+                    batch_size=min(32, len(images))
                 )
                 if len(memory_batch['images']) > 0:
+                    print("DEBUG: memory batch size ", len(memory_batch['images']))
                     memory_batch['images'] = memory_batch['images'].to(self.device)
             
             # Compute hierarchical loss
