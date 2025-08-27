@@ -9,13 +9,14 @@ import numpy as np
 import os
 
 from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.checkpoint import checkpoint
 from typing import Dict, List, Optional, Tuple
 from tqdm import tqdm
 from src.trainers.continual_trainer import ContinualTrainer
 from src.models.hierarchical_lora import HierarchicalLoRAViT
 from src.utils.visualization import HierarchicalVisualizer, MetricsAnimator
 from src.models.orthogonal_utils import compute_orthogonality_score
-
+        
 class HierarchicalTrainer(ContinualTrainer):
     """
     Extended trainer for hierarchical LoRA with dual unknown mechanism.
@@ -577,70 +578,170 @@ class HierarchicalTrainer(ContinualTrainer):
         
         print(f"Buffer updated. Current size: {len(self.memory_buffer)}")
 
-    def align_ood_detection(self, memory_buffer, num_epochs=20, batch_size=32):
+    def align_ood_detection(self, memory_buffer, num_epochs=5, batch_size=32, max_samples=1000):
         """
-        OOD Detection Alignment
+        Memory-efficient OOD alignment combining multiple optimization strategies
         """
-        print("OOD Detection Alignment")
-        # Get memory data
-        all_memory_data = memory_buffer.get_all_data()
-        if len(all_memory_data['images']) == 0:
+        # Get subset of memory for alignment (Strategy 1)
+        alignment_data = self._get_alignment_subset(memory_buffer, max_samples)
+        if len(alignment_data['images']) == 0:
             return
-        print("DEBUG: Gathered all data from memory")
-        # Only train classification heads
+        
+        print(f"\n=== OOD Detection Alignment Stage ===")
+        print(f"Using {len(alignment_data['images'])} samples from memory buffer")
+        
+        # Pre-compute features on CPU (Strategy 2)
+        print("Pre-computing features...")
+        self.model.eval()
+
+        # Move backbone to CPU temporarily
+        original_device = next(self.model.backbone.parameters()).device
+        self.model.backbone.cpu()
+        
+        all_features = []
+        with torch.no_grad():
+            for i in range(0, len(alignment_data['images']), batch_size):
+                batch_images = alignment_data['images'][i:i+batch_size]
+                
+                # Use gradient checkpointing for memory efficiency (Strategy 3)
+                if hasattr(self, '_forward_with_checkpointing'):
+                    features = self._forward_with_checkpointing(batch_images)
+                else:
+                    features = self.model.backbone(batch_images)
+                
+                all_features.append(features.cpu())  # Keep on CPU
+        
+        all_features = torch.cat(all_features, dim=0)
+        
+        # Move backbone back to original device
+        self.model.backbone.to(original_device)
+        
+        # Setup optimizer for heads only
         head_params = []
         for task_id in self.model.task_heads.keys():
+            self.model.task_heads[task_id].to(self.device)
             for param in self.model.task_heads[task_id].parameters():
                 param.requires_grad = True
                 head_params.append(param)
-        print("DEBUG: Unfreeze all heads")
+        
         optimizer = torch.optim.Adam(head_params, lr=1e-4)
         
+        # Create indices for efficient lookup
         dataset = TensorDataset(
-            all_memory_data['images'],
-            all_memory_data['labels'],
-            torch.tensor(range(len(all_memory_data['labels'])))
+            all_features,  # CPU tensors
+            alignment_data['labels'],
+            torch.tensor(range(len(alignment_data['labels'])))
         )
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         
-        dataloader = DataLoader(dataset, batch_size = batch_size, shuffle=True)
-        print("DEBUG: DataLoader Created")
+        # Training loop - process batches
         for epoch in range(num_epochs):
             epoch_loss = 0
-
-            for batch_images, batch_labels, batch_indices in dataloader:
-                batch_images = batch_images.to(self.device)
+            
+            for batch_features, batch_labels, batch_indices in dataloader:
+                # Move only current batch to GPU
+                batch_features = batch_features.to(self.device)
                 batch_labels = batch_labels.to(self.device)
-
-                # Compute features for this batch
-                with torch.no_grad():
-                    features = self.model.backbone(batch_images)
-
+                
+                # Get task IDs for this batch
+                batch_task_ids = [alignment_data['task_ids'][idx.item()] for idx in batch_indices]
+                
                 optimizer.zero_grad()
                 batch_loss = 0
-
-                # Get task_ids for this batch
-                batch_task_ids = [all_memory_data['task_ids'][idx.item()] for idx in batch_indices]
-
-                # For each task head h_j
+                
+                # Process each head
                 for task_j in self.model.task_heads.keys():
-                    logits = self.model.task_heads[task_j](features)
-
-                    # Create labels
+                    logits = self.model.task_heads[task_j](batch_features)
+                    
+                    # Create labels according to paper
                     labels = []
-                    for i, (label, task_id) in enumerate(zip(batch_labels, batch_task_ids)):
+                    for label, task_id in zip(batch_labels, batch_task_ids):
                         if task_id == task_j:
                             labels.append(label.item() % self.model.task_classes[task_j])
                         else:
-                            labels.append(self.model.task_classes[task_j]) # Unknown
+                            labels.append(self.model.task_classes[task_j])  # unknown
                     
                     labels = torch.tensor(labels, device=self.device)
                     loss_j = F.cross_entropy(logits, labels)
                     batch_loss += loss_j
-            
+                
                 avg_loss = batch_loss / len(self.model.task_heads)
                 avg_loss.backward()
                 optimizer.step()
-
+                
                 epoch_loss += avg_loss.item()
-                print(f"Alignment Epoch {epoch+1}/{num_epochs}: Loss = {epoch_loss}/{len(dataloader):.4f}")
+                
+                # Clear batch from GPU
+                del batch_features
+                if epoch % 5 == 0:  # Periodic cache clearing
+                    torch.cuda.empty_cache()
+            
+            print(f"Alignment Epoch {epoch+1}/{num_epochs}: Loss = {epoch_loss/len(dataloader):.4f}")
 
+    def _get_alignment_subset(self, memory_buffer, max_samples=1000):
+        """
+        Get representative subset from memory buffer (Strategy 1)
+        """
+        all_data = memory_buffer.get_all_data()
+        
+        if len(all_data['images']) <= max_samples:
+            return all_data
+        
+        # Stratified sampling: equal samples per task
+        subset = {'images': [], 'labels': [], 'task_ids': []}
+        unique_tasks = list(set(all_data['task_ids']))
+        samples_per_task = max_samples // len(unique_tasks)
+        
+        for task_id in unique_tasks:
+            # Get indices for this task
+            task_indices = [i for i, tid in enumerate(all_data['task_ids']) if tid == task_id]
+            
+            # Sample subset
+            if len(task_indices) > samples_per_task:
+                import random
+                task_indices = random.sample(task_indices, samples_per_task)
+            
+            for idx in task_indices:
+                subset['images'].append(all_data['images'][idx])
+                subset['labels'].append(all_data['labels'][idx])
+                subset['task_ids'].append(task_id)
+        
+        subset['images'] = torch.stack(subset['images']) if subset['images'] else torch.tensor([])
+        subset['labels'] = torch.tensor(subset['labels']) if subset['labels'] else torch.tensor([])
+        
+        return subset
+
+    def _forward_with_checkpointing(self, x):
+        """
+        Forward pass with gradient checkpointing (Strategy 3)
+        """        
+        # Initial embedding
+        x = self.model.backbone.patch_embed(x)
+        x = x + self.model.backbone.pos_embed
+        x = self.model.backbone.pos_drop(x)
+        
+        # Process blocks with checkpointing
+        def run_blocks(x, start, end):
+            for i in range(start, end):
+                x = self.model.backbone.blocks[i](x)
+            return x
+        
+        # Checkpoint every 3 blocks
+        num_blocks = len(self.model.backbone.blocks)
+        for i in range(0, num_blocks, 3):
+            end = min(i + 3, num_blocks)
+            if self.training:
+                x = checkpoint(run_blocks, x, i, end)
+            else:
+                x = run_blocks(x, i, end)
+        
+        # Final norm
+        x = self.model.backbone.norm(x)
+        
+        # Extract class token or average pool
+        if hasattr(self.model.backbone, 'fc_norm'):
+            x = self.model.backbone.fc_norm(x.mean(1))
+        else:
+            x = x[:, 0]  # class token
+        
+        return x
