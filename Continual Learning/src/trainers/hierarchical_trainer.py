@@ -577,7 +577,7 @@ class HierarchicalTrainer(ContinualTrainer):
         
         print(f"Buffer updated. Current size: {len(self.memory_buffer)}")
 
-    def align_ood_detection(self, memory_buffer, num_epochs=20):
+    def align_ood_detection(self, memory_buffer, num_epochs=20, batch_size=32):
         """
         OOD Detection Alignment
         """
@@ -596,46 +596,52 @@ class HierarchicalTrainer(ContinualTrainer):
         
         optimizer = torch.optim.Adam(head_params, lr=1e-4)
         
-        # Pre-compute features once
-        with torch.no_grad():
-            features = self.model.backbone(all_memory_data['images'].to(self.device))
+        dataset = TensorDataset(
+            all_memory_data['images'],
+            all_memory_data['labels'],
+            torch.tensor(range(len(all_memory_data['labels'])))
+        )
         
+        dataloader = DataLoader(dataset, batch_size = batch_size, shuffle=True)
+
         for epoch in range(num_epochs):
-            optimizer.zero_grad()
-            total_loss = 0
-            num_terms = 0
+            epoch_loss = 0
+
+            for batch_images, batch_labels, batch_indices in dataloader:
+                batch_images = batch_images.to(self.device)
+                batch_labels = batch_labels.to(self.device)
+
+                # Compute features for this batch
+                with torch.no_grad():
+                    features = self.model.backbone(batch_images)
+
+                optimizer.zero_grad()
+                batch_loss = 0
+
+                # Get task_ids for this batch
+                batch_task_ids = [all_memory_data['task_ids'][idx.item()] for idx in batch_indices]
+
+                # For each task head h_j
+                for task_j in self.model.task_heads.keys():
+                    logits = self.model.task_heads[task_j](features)
+
+                    # Create labels
+                    labels = []
+                    for i, (label, task_id) in enumerate(zip(batch_labels, batch_task_ids)):
+                        if task_id == task_j:
+                            labels.append(label.item() % self.model.task_classes[task_j])
+                        else:
+                            labels.append(self.model.task_classes[task_j]) # Unknown
+                    
+                    labels = torch.tensor(labels, device=self.device)
+                    loss_j = F.cross_entropy(logits, labels)
+                    batch_loss += loss_j
             
-            # For each task head h_j
-            for task_j in self.model.task_heads.keys():
-                # Get task j's class indices
-                task_j_classes = set()
-                for i, tid in enumerate(all_memory_data['task_ids']):
-                    if tid == task_j:
-                        task_j_classes.add(all_memory_data['labels'][i].item())
-                
-                # Forward all samples through head h_j
-                logits = self.model.task_heads[task_j](features)
-                
-                # Create labels according to equation (3)
-                labels = []
-                for i, (label, task_id) in enumerate(zip(all_memory_data['labels'], all_memory_data['task_ids'])):
-                    if task_id == task_j:
-                        # x_i ∈ D_j: use actual label (adjusted for task-local indexing)
-                        labels.append(label.item() % self.model.task_classes[task_j])
-                    else:
-                        # x_i ∉ D_j: use unknown class (C_j + 1)
-                        labels.append(self.model.task_classes[task_j])  # This is the unknown index
-                
-                labels = torch.tensor(labels, device=self.device)
-                
-                # Compute loss for this head
-                loss_j = F.cross_entropy(logits, labels)
-                total_loss += loss_j
-                num_terms += 1
-            
-            # Average over all heads (as in equation 3: 1/|M_t| sum over heads)
-            avg_loss = total_loss / num_terms
-            avg_loss.backward()
-            optimizer.step()
-            
-            print(f"Alignment Epoch {epoch+1}/{num_epochs}: Loss = {avg_loss.item():.4f}")
+                avg_loss = batch_loss / len(self.model.task_heads)
+                avg_loss.backward()
+                optimizer.step()
+
+                epoch_loss += avg_loss.item()
+        
+        print(f"Alignment Epoch {epoch+1}/{num_epochs}: Loss = {epoch_loss}/{len(dataloader):.4f}")
+
