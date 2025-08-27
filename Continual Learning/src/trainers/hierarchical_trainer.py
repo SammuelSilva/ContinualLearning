@@ -586,14 +586,14 @@ class HierarchicalTrainer(ContinualTrainer):
         all_memory_data = memory_buffer.get_all_data()
         if len(all_memory_data['images']) == 0:
             return
-        
+        print("DEBUG: Gathered all data from memory")
         # Only train classification heads
         head_params = []
         for task_id in self.model.task_heads.keys():
             for param in self.model.task_heads[task_id].parameters():
                 param.requires_grad = True
                 head_params.append(param)
-        
+        print("DEBUG: Unfreeze all heads")
         optimizer = torch.optim.Adam(head_params, lr=1e-4)
         
         dataset = TensorDataset(
@@ -603,7 +603,7 @@ class HierarchicalTrainer(ContinualTrainer):
         )
         
         dataloader = DataLoader(dataset, batch_size = batch_size, shuffle=True)
-
+        print("DEBUG: DataLoader Created")
         for epoch in range(num_epochs):
             epoch_loss = 0
 
@@ -642,6 +642,5 @@ class HierarchicalTrainer(ContinualTrainer):
                 optimizer.step()
 
                 epoch_loss += avg_loss.item()
-        
-        print(f"Alignment Epoch {epoch+1}/{num_epochs}: Loss = {epoch_loss}/{len(dataloader):.4f}")
+                print(f"Alignment Epoch {epoch+1}/{num_epochs}: Loss = {epoch_loss}/{len(dataloader):.4f}")
 
