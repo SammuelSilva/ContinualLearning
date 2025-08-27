@@ -746,10 +746,6 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                 else:
                     block_idx = 0
                 if block_idx < len(self.merged_blocks):
-                    if flag:
-                        print(f"DEBUG: task in block {block_idx}")
-                        flag = False
-
                     # Task is in a merged block
                     block = self.merged_blocks[block_idx]
                     
@@ -767,12 +763,8 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                     # Task is in active block
                     if self.active_block_tasks:
                         task_unknown_probs = {}
-                        flag = -1
+                        print(f"DEBUG: Tasks in active block: {self.active_block_tasks.keys()}")
                         for task_id in self.active_block_tasks.keys():
-                            
-                            if flag != task_id:
-                                print(f"DEBUG: Task {task_id} is in active block")
-                                flag = task_id
                             logits = self.forward(x[i:i+1], task_id=task_id)
                             probs = F.softmax(logits, dim=-1)
                             task_unknown_probs[task_id] = probs[0, -1].item()

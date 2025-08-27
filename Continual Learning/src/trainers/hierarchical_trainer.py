@@ -143,10 +143,6 @@ class HierarchicalTrainer(ContinualTrainer):
             total_loss += self.lambda_block_unknown * losses['block_unknown']
         if 'intra_block_reg' in losses:
             total_loss += 0.1 * losses['intra_block_reg']
-        
-        if 'task_unknown' in losses:
-            print(f"OOD Training: Task {task_id} learning to reject {len(memory_batch['images'])} samples from previous tasks")
-            print(f"Unknown loss: {losses['task_unknown'].item():.4f}")
 
         losses['total'] = total_loss
         return losses
@@ -352,7 +348,7 @@ class HierarchicalTrainer(ContinualTrainer):
         
         # Update memory buffer and heads alignment
         self._update_memory_buffer(train_loader, task_id)
-        self.align_ood_detection(self.memory_buffer, num_epochs=num_epochs//2 if num_epochs/2 > 5 else 5)
+        self.align_ood_detection(self.memory_buffer, num_epochs=num_epochs//2 if num_epochs/2 > 20 else 20)
 
         # Compute and store orthogonality score
         if len(self.model.active_block_tasks) > 1:
@@ -582,10 +578,11 @@ class HierarchicalTrainer(ContinualTrainer):
         
         print(f"Buffer updated. Current size: {len(self.memory_buffer)}")
 
-    def align_ood_detection(self, memory_buffer, num_epochs=5):
+    def align_ood_detection(self, memory_buffer, num_epochs=20):
         """
-        OOD Detection Alignment - matching paper's equation (3)
+        OOD Detection Alignment
         """
+        print("OOD Detection Alignment")
         # Get memory data
         all_memory_data = memory_buffer.get_all_data()
         if len(all_memory_data['images']) == 0:
