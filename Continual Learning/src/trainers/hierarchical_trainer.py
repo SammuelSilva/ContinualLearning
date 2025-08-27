@@ -591,17 +591,21 @@ class HierarchicalTrainer(ContinualTrainer):
         print(f"Using {len(alignment_data['images'])} samples from memory buffer")
         
         # Pre-compute features on CPU (Strategy 2)
-        print("Pre-computing features...")
         self.model.eval()
 
         # Move backbone to CPU temporarily
         original_device = next(self.model.backbone.parameters()).device
         self.model.backbone.cpu()
         
-        print("Loading Features to CPU...")
         all_features = []
+        feature_pbar = tqdm(
+            range(0, len(alignment_data['images']), batch_size),
+            desc="Extracting Features",
+            total=len(alignment_data['images'])//(batch_size + 1)
+        )
+
         with torch.no_grad():
-            for i in range(0, len(alignment_data['images']), batch_size):
+            for i in feature_pbar:
                 batch_images = alignment_data['images'][i:i+batch_size]
                 features = self.model.backbone(batch_images)
                 all_features.append(features.cpu())  # Keep on CPU
@@ -611,7 +615,6 @@ class HierarchicalTrainer(ContinualTrainer):
         # Move backbone back to original device
         self.model.backbone.to(original_device)
 
-        print("Unfreezing Heads...")
         # Setup optimizer for heads only
         head_params = []
         for task_id in self.model.task_heads.keys():
@@ -630,12 +633,17 @@ class HierarchicalTrainer(ContinualTrainer):
         )
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         
-        print("Training loop - process batches...")
         # Training loop - process batches
         for epoch in range(num_epochs):
             epoch_loss = 0
             
-            for batch_features, batch_labels, batch_indices in dataloader:
+            batch_pbar = tqdm(
+                dataloader,
+                desc=f"Alignment Epoch {epoch+1}/{num_epochs}",
+                leave=False
+            )
+
+            for batch_features, batch_labels, batch_indices in batch_pbar:
                 # Move only current batch to GPU
                 batch_features = batch_features.to(self.device)
                 batch_labels = batch_labels.to(self.device)
@@ -668,6 +676,8 @@ class HierarchicalTrainer(ContinualTrainer):
                 
                 epoch_loss += avg_loss.item()
                 
+                batch_pbar.set_postfix({'loss': f'{avg_loss.item():.4f}'})
+
                 # Clear batch from GPU
                 del batch_features
                 if epoch % 5 == 0:  # Periodic cache clearing
@@ -689,7 +699,10 @@ class HierarchicalTrainer(ContinualTrainer):
         unique_tasks = list(set(all_data['task_ids']))
         samples_per_task = max_samples // len(unique_tasks)
         
-        for task_id in unique_tasks:
+        task_pbar = tqdm(unique_tasks, desc="Sampling Tasks", leave=False)
+
+        for task_id in task_pbar:
+            task_pbar.set_postfix({'task': task_id})
             # Get indices for this task
             task_indices = [i for i, tid in enumerate(all_data['task_ids']) if tid == task_id]
             
