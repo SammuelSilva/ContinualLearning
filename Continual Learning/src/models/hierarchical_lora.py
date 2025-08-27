@@ -745,7 +745,6 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                     block_idx = block_indices[i].item()
                 else:
                     block_idx = 0
-                print(f"DEBUG: block {block_idx} < {len(self.merged_blocks)}")
                 if block_idx < len(self.merged_blocks):
                     if flag:
                         print(f"DEBUG: task in block {block_idx}")
@@ -779,7 +778,6 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                             task_unknown_probs[task_id] = probs[0, -1].item()
                         
                         best_task = min(task_unknown_probs, key=task_unknown_probs.get)
-                        print(f"DEBUG: Task_unknown_probs {task_unknown_probs}")
                         predicted_tasks.append(best_task)
                         task_confidences.append(1 - task_unknown_probs[best_task])
                     else:
@@ -787,7 +785,8 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                         print("DEBUG: Fallback.")
                         predicted_tasks.append("task_0")
                         task_confidences.append(0.0)
-            
+
+            print(f"DEBUG: Task_unknown_probs {task_confidences}")
             task_confidences = torch.tensor(task_confidences, device=x.device)
     
         return predicted_tasks, task_confidences
