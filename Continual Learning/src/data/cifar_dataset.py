@@ -135,7 +135,7 @@ class ContinualCIFAR100:
             batch_size=batch_size,
             shuffle=True,
             num_workers=num_workers,
-            pin_memory=True
+            pin_memory=False
         )
         
         val_loader = DataLoader(
@@ -143,7 +143,7 @@ class ContinualCIFAR100:
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
-            pin_memory=True
+            pin_memory=False
         )
         
         test_loader = DataLoader(
@@ -151,7 +151,7 @@ class ContinualCIFAR100:
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
-            pin_memory=True
+            pin_memory=False
         )
         
         return train_loader, val_loader, test_loader
@@ -202,9 +202,16 @@ class TaskDataset(Dataset):
         
         # Filter indices for this task
         self.indices = []
-        for idx, (_, label) in enumerate(base_dataset):
-            if label in task_classes:
-                self.indices.append(idx)
+        if hasattr(base_dataset, 'targets'):
+            for idx, label in enumerate(base_dataset.targets):
+                if label in task_classes:
+                    self.indices.append(idx)
+        else:
+            for idx in range(len(base_dataset)):
+                _, label = base_dataset[idx]
+                if label in task_classes:
+                    self.indices.append(idx)
+
     
     def __len__(self) -> int:
         return len(self.indices)
