@@ -286,48 +286,79 @@ class HierarchicalTrainer(ContinualTrainer):
         task_idx: Optional[int] = None
     ):
         """
-        Extended training with hierarchical features.
+        Memory-efficient training using cached features
         """
         print(f"\n{'='*60}")
-        print(f"Training Task {task_id} (Hierarchical Mode)")
-        print(f"Current Block: {self.model.current_block_id}")
-        print(f"Tasks in Block: {len(self.model.active_block_tasks)}")
+        print(f"Training Task {task_id} (Memory-Efficient Mode)")
         print(f"{'='*60}\n")
         
         # Set active task
         self.model.set_active_task(task_id)
         
-        # Create optimizer
+        # Step 1: Pre-compute all training features on CPU
+        print("Pre-computing training features on CPU...")
+        self.model.backbone.cpu()
+        train_features = []
+        train_labels = []
+        
+        with torch.no_grad():
+            for images, labels in tqdm(train_loader, desc="Extracting features"):
+                features = self.model.backbone(images)
+                train_features.append(features)
+                train_labels.append(labels)
+        
+        train_features = torch.cat(train_features)
+        train_labels = torch.cat(train_labels)
+        
+        # Pre-compute validation features too
+        print("Pre-computing validation features...")
+        val_features = []
+        val_labels = []
+        
+        with torch.no_grad():
+            for images, labels in tqdm(val_loader, desc="Extracting val features"):
+                features = self.model.backbone(images)
+                val_features.append(features)
+                val_labels.append(labels)
+        
+        val_features = torch.cat(val_features)
+        val_labels = torch.cat(val_labels)
+        
+        # Move backbone back to GPU for memory buffer operations
+        self.model.backbone.to(self.device)
+        
+        # Create feature dataloaders
+        train_dataset = torch.utils.data.TensorDataset(train_features, train_labels)
+        feature_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+        
+        val_dataset = torch.utils.data.TensorDataset(val_features, val_labels)
+        val_feature_loader = DataLoader(val_dataset, batch_size=128, shuffle=False)
+        
+        # Only optimize task head and LoRA adapters (lightweight)
         optimizer = torch.optim.AdamW(
             self.model.get_trainable_parameters(),
             lr=self.learning_rate,
             weight_decay=self.weight_decay
         )
         
-        # Learning rate scheduler with warmup for new blocks
-        if len(self.model.active_block_tasks) == 1:
-            # First task in new block - use warmup
-            warmup_steps = num_epochs // 5
-            scheduler = self._create_warmup_scheduler(optimizer, warmup_steps, num_epochs)
-        else:
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=num_epochs
-            )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=num_epochs
+        )
         
         best_val_acc = 0
         patience_counter = 0
         
         for epoch in range(num_epochs):
-            # Training
-            train_loss, train_acc = self._train_epoch_hierarchical(
-                train_loader, optimizer, task_id
+            # Training with cached features
+            train_loss, train_acc = self._train_epoch_cached(
+                feature_loader, optimizer, task_id
             )
             
+            # Validation with cached features
+            val_loss, val_acc = self._validate_cached(
+                val_feature_loader, task_id
+            )
             
-            # Validation
-            val_loss, val_acc = self._validate(val_loader, task_id)
-            
-            # Update scheduler
             scheduler.step()
             
             # Early stopping
@@ -338,18 +369,20 @@ class HierarchicalTrainer(ContinualTrainer):
             else:
                 patience_counter += 1
             
-            # Log metrics
             print(f"Epoch {epoch+1}/{num_epochs} | "
-                  f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
-                  f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+                f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
+                f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
             
             if patience_counter >= patience:
                 print(f"Early stopping at epoch {epoch+1}")
                 break
         
-        # Update memory buffer and heads alignment
+        # Update memory buffer (need to move backbone back to GPU temporarily)
         self._update_memory_buffer(train_loader, task_id)
-        self.align_ood_detection(self.memory_buffer, num_epochs=num_epochs//2 if num_epochs/2 > 10 else 10)
+    
+        # Run OOD alignment if we have memory
+        if len(self.memory_buffer) > 0:
+            self.align_ood_detection(self.memory_buffer, num_epochs=num_epochs)
 
         # Compute and store orthogonality score
         if len(self.model.active_block_tasks) > 1:
@@ -403,7 +436,98 @@ class HierarchicalTrainer(ContinualTrainer):
         
         return best_val_acc
 
-    
+    def _train_epoch_cached(
+        self,
+        feature_loader: DataLoader,
+        optimizer: torch.optim.Optimizer,
+        task_id: str
+    ) -> Tuple[float, float]:
+        """
+        Train epoch using pre-cached features
+        """
+        self.model.train()
+        total_loss = 0
+        correct = 0
+        total = 0
+        
+        pbar = tqdm(feature_loader, desc="Training")
+        for features, labels in pbar:
+            features = features.to(self.device)
+            labels = labels.to(self.device)
+            
+            # Forward through task head only (very fast)
+            logits = self.model.task_heads[task_id](features)
+            
+            # Task loss
+            loss_task = F.cross_entropy(logits[:, :-1], labels)
+            
+            # OOD loss with memory samples
+            loss_total = loss_task
+            if len(self.memory_buffer) > 0:
+                memory_batch = self.memory_buffer.sample(batch_size=16)
+                if len(memory_batch['images']) > 0:
+                    # Need backbone for memory samples
+                    with torch.no_grad():
+                        mem_features = self.model.backbone(memory_batch['images'].to(self.device))
+                    
+                    mem_logits = self.model.task_heads[task_id](mem_features)
+                    unknown_labels = torch.full(
+                        (len(mem_features),),
+                        self.model.task_classes[task_id],
+                        dtype=torch.long,
+                        device=self.device
+                    )
+                    loss_unknown = F.cross_entropy(mem_logits, unknown_labels)
+                    loss_total = loss_task + self.lambda_unknown * loss_unknown
+            
+            # Backward
+            optimizer.zero_grad()
+            loss_total.backward()
+            torch.nn.utils.clip_grad_norm_(
+                self.model.get_trainable_parameters(), 1.0
+            )
+            optimizer.step()
+            
+            # Metrics
+            with torch.no_grad():
+                predictions = torch.argmax(logits[:, :-1], dim=1)
+                correct += (predictions == labels).sum().item()
+                total += labels.size(0)
+                total_loss += loss_total.item()
+            
+            pbar.set_postfix({'loss': f'{loss_total.item():.4f}', 
+                            'acc': f'{100*correct/total:.1f}%'})
+        
+        return total_loss / len(feature_loader), 100 * correct / total
+
+    def _validate_cached(
+        self,
+        val_feature_loader: DataLoader,
+        task_id: str
+    ) -> Tuple[float, float]:
+        """
+        Validate using pre-cached features
+        """
+        self.model.eval()
+        total_loss = 0
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for features, labels in val_feature_loader:
+                features = features.to(self.device)
+                labels = labels.to(self.device)
+                
+                logits = self.model.task_heads[task_id](features)
+                loss = F.cross_entropy(logits[:, :-1], labels)
+                
+                predictions = torch.argmax(logits[:, :-1], dim=1)
+                correct += (predictions == labels).sum().item()
+                total += labels.size(0)
+                total_loss += loss.item()
+        
+        return total_loss / len(val_feature_loader), 100 * correct / total
+
     def _train_epoch_hierarchical(
         self,
         train_loader: DataLoader,
