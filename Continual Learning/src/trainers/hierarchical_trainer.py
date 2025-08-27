@@ -598,6 +598,7 @@ class HierarchicalTrainer(ContinualTrainer):
         original_device = next(self.model.backbone.parameters()).device
         self.model.backbone.cpu()
         
+        print("Loading Features to CPU...")
         all_features = []
         with torch.no_grad():
             for i in range(0, len(alignment_data['images']), batch_size):
@@ -609,7 +610,8 @@ class HierarchicalTrainer(ContinualTrainer):
         
         # Move backbone back to original device
         self.model.backbone.to(original_device)
-        
+
+        print("Unfreezing Heads...")
         # Setup optimizer for heads only
         head_params = []
         for task_id in self.model.task_heads.keys():
@@ -628,6 +630,7 @@ class HierarchicalTrainer(ContinualTrainer):
         )
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         
+        print("Training loop - process batches...")
         # Training loop - process batches
         for epoch in range(num_epochs):
             epoch_loss = 0
