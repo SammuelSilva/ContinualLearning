@@ -352,7 +352,7 @@ class HierarchicalTrainer(ContinualTrainer):
         
         # Update memory buffer and heads alignment
         self._update_memory_buffer(train_loader, task_id)
-        self.align_ood_detection(self.memory_buffer, num_epochs=5)
+        self.align_ood_detection(self.memory_buffer, num_epochs=num_epochs/2 if num_epochs/2 > 5 else 5)
 
         # Compute and store orthogonality score
         if len(self.model.active_block_tasks) > 1:
