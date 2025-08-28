@@ -380,9 +380,6 @@ class OrthogonalMergedBlock(nn.Module):
             original_attn = self.original_blocks[layer_idx]['attn']
             original_mlp = self.original_blocks[layer_idx]['mlp']
 
-            print(f"  - Using original_attn type: {type(original_attn)}")
-            print(f"  - original_attn.qkv type: {type(original_attn.qkv) if hasattr(original_attn, 'qkv') else 'NO QKV ATTR'}")
-
             # Attention
             if layer_idx < len(self.merged_attention_modules) and self.merged_attention_modules[layer_idx] is not None:
                 merged_attn_module = self.merged_attention_modules[layer_idx]
