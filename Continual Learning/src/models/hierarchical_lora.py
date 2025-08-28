@@ -21,6 +21,7 @@ class OrthogonalMergedBlock(nn.Module):
     
     def __init__(
         self,
+        original_blocks: List[Dict[str, nn.Module]],
         task_adapters: Dict[str, TaskSpecificLoRA],
         task_heads: Dict[str, nn.Module],
         block_id: int,
@@ -34,6 +35,7 @@ class OrthogonalMergedBlock(nn.Module):
         merge_strategy: str = "qr"  # Add merge strategy parameter
     ):
         super().__init__()
+        self.original_blocks = original_blocks
         self.block_id = block_id
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
@@ -372,20 +374,15 @@ class OrthogonalMergedBlock(nn.Module):
         Inject this block's merged LoRA modules into the backbone.
         Fixed to work with the existing LoRAAttention/LoRAMlp structure.
         """
-        # Store original blocks if not already stored
-        if not hasattr(self, '_stored_originals'):
-            self._stored_originals = []
-            for block in backbone.blocks:
-                self._stored_originals.append({
-                    'attn': block.attn,
-                    'mlp': block.mlp
-                })
-        
+
         for layer_idx, block in enumerate(backbone.blocks):
             # Get the TRUE original (not LoRA-wrapped)
-            original_attn = self._stored_originals[layer_idx]['attn']
-            original_mlp = self._stored_originals[layer_idx]['mlp']
-            
+            original_attn = self.original_blocks[layer_idx]['attn']
+            original_mlp = self.original_blocks[layer_idx]['mlp']
+
+            print(f"  - Using original_attn type: {type(original_attn)}")
+            print(f"  - original_attn.qkv type: {type(original_attn.qkv) if hasattr(original_attn, 'qkv') else 'NO QKV ATTR'}")
+
             # Attention
             if layer_idx < len(self.merged_attention_modules) and self.merged_attention_modules[layer_idx] is not None:
                 merged_attn_module = self.merged_attention_modules[layer_idx]
@@ -408,6 +405,8 @@ class OrthogonalMergedBlock(nn.Module):
                         lora_attn.lora_adapters["v"] = merged_attn_module.task_v[task_id]
                 else:
                     # Use merged adapters - but we need to wrap them properly
+                    print(f"  - Using merged adapters")
+
                     lora_attn = LoRAAttention(
                         original_attn=original_attn,
                         hidden_dim=self.hidden_dim,
@@ -416,6 +415,8 @@ class OrthogonalMergedBlock(nn.Module):
                         lora_dropout=0.1,
                         target_modules=["q", "v"]
                     )
+                    print(f"  - Created LoRAAttention, checking its original_attn.qkv: {type(lora_attn.original_attn.qkv)}")
+
                     # Replace with merged modules
                     if merged_attn_module.q_module:
                         lora_attn.lora_adapters["q"] = merged_attn_module.q_module
@@ -454,10 +455,9 @@ class OrthogonalMergedBlock(nn.Module):
         """
         Remove this block's LoRA modules from the backbone.
         """
-        if hasattr(self, '_stored_originals'):
-            for layer_idx, block in enumerate(backbone.blocks):
-                block.attn = self._stored_originals[layer_idx]['attn']
-                block.mlp = self._stored_originals[layer_idx]['mlp']
+        for layer_idx, block in enumerate(backbone.blocks):
+            block.attn = self.original_blocks[layer_idx]['attn']
+            block.mlp = self.original_blocks[layer_idx]['mlp']
     
     def forward_with_backbone(self, x: torch.Tensor, backbone: nn.Module, 
                              task_id: Optional[str] = None) -> torch.Tensor:
@@ -645,6 +645,7 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
         
         # Create merged block with selected strategy
         merged_block = OrthogonalMergedBlock(
+            original_blocks=self.original_blocks,
             task_adapters=adapters_to_merge,
             task_heads=heads_to_merge,
             block_id=self.current_block_id,
