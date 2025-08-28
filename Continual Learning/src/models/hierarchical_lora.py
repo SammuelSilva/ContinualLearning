@@ -370,75 +370,66 @@ class OrthogonalMergedBlock(nn.Module):
     def inject_into_backbone(self, backbone: nn.Module, task_id: Optional[str] = None):
         """
         Inject this block's merged LoRA modules into the backbone.
-        This modifies the backbone's blocks to use our orthogonal adapters.
+        Fixed to work with the existing LoRAAttention/LoRAMlp structure.
         """
+        # Store original blocks if not already stored
+        if not hasattr(self, '_stored_originals'):
+            self._stored_originals = []
+            for block in backbone.blocks:
+                self._stored_originals.append({
+                    'attn': block.attn,
+                    'mlp': block.mlp
+                })
+        
         for layer_idx, block in enumerate(backbone.blocks):
-            # Replace attention with LoRA-enhanced version if needed
+            # Get the TRUE original (not LoRA-wrapped)
+            original_attn = self._stored_originals[layer_idx]['attn']
+            original_mlp = self._stored_originals[layer_idx]['mlp']
+            
+            # Attention
             if layer_idx < len(self.merged_attention_modules) and self.merged_attention_modules[layer_idx] is not None:
-                # Create LoRAAttention wrapper
-                lora_attn = LoRAAttention(
-                    original_attn=block.attn,
-                    hidden_dim=self.hidden_dim,
-                    lora_rank=self.lora_rank,
-                    lora_alpha=self.lora_alpha,
-                    lora_dropout=0.1,
-                    target_modules=["q", "v"]
-                )
+                merged_attn_module = self.merged_attention_modules[layer_idx]
                 
-                # Replace the lora_adapters with our merged ones
-                merged_adapter = self.merged_attention_modules[layer_idx]
+                # Create a LoRAAttention that uses our merged adapters
+                if task_id and task_id in merged_attn_module.task_q:
+                    # Task-specific: use the original task's LoRA
+                    lora_attn = LoRAAttention(
+                        original_attn=original_attn,
+                        hidden_dim=self.hidden_dim,
+                        lora_rank=self.lora_rank,
+                        lora_alpha=self.lora_alpha,
+                        lora_dropout=0.1,
+                        target_modules=["q", "v"]
+                    )
+                    # Use task-specific adapters
+                    if task_id in merged_attn_module.task_q:
+                        lora_attn.lora_adapters["q"] = merged_attn_module.task_q[task_id]
+                    if task_id in merged_attn_module.task_v:
+                        lora_attn.lora_adapters["v"] = merged_attn_module.task_v[task_id]
+                else:
+                    # Use merged adapters - but we need to wrap them properly
+                    lora_attn = LoRAAttention(
+                        original_attn=original_attn,
+                        hidden_dim=self.hidden_dim,
+                        lora_rank=self.lora_rank,
+                        lora_alpha=self.lora_alpha,
+                        lora_dropout=0.1,
+                        target_modules=["q", "v"]
+                    )
+                    # Replace with merged modules
+                    if merged_attn_module.q_module:
+                        lora_attn.lora_adapters["q"] = merged_attn_module.q_module
+                    if merged_attn_module.v_module:
+                        lora_attn.lora_adapters["v"] = merged_attn_module.v_module
                 
-                # Custom forward that uses our merged adapter
-                original_lora_forward = lora_attn.forward
-                
-                def custom_attn_forward(x, attn_mask=None):
-                    B, N, C = x.shape
-                    
-                    # Get Q, K, V from original attention
-                    qkv = lora_attn.original_attn.qkv(x).reshape(
-                        B, N, 3, lora_attn.original_attn.num_heads, 
-                        C // lora_attn.original_attn.num_heads
-                    ).permute(2, 0, 3, 1, 4)
-                    q, k, v = qkv.unbind(0)
-                    
-                    # Apply our merged LoRA
-                    lora_outputs = merged_adapter(x, task_id=task_id)
-                    
-                    if 'q' in lora_outputs:
-                        q_adapt = lora_outputs['q'].reshape(
-                            B, N, lora_attn.original_attn.num_heads,
-                            C // lora_attn.original_attn.num_heads
-                        ).permute(0, 2, 1, 3)
-                        q = q + q_adapt
-                    
-                    if 'v' in lora_outputs:
-                        v_adapt = lora_outputs['v'].reshape(
-                            B, N, lora_attn.original_attn.num_heads,
-                            C // lora_attn.original_attn.num_heads
-                        ).permute(0, 2, 1, 3)
-                        v = v + v_adapt
-                    
-                    # Compute attention
-                    attn = (q @ k.transpose(-2, -1)) * lora_attn.original_attn.scale
-                    if attn_mask is not None:
-                        attn = attn + attn_mask
-                    attn = attn.softmax(dim=-1)
-                    attn = lora_attn.original_attn.attn_drop(attn)
-                    
-                    x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-                    x = lora_attn.original_attn.proj(x)
-                    x = lora_attn.original_attn.proj_drop(x)
-                    
-                    return x
-                
-                lora_attn.forward = custom_attn_forward
                 block.attn = lora_attn
             
-            # Replace FFN with LoRA-enhanced version if needed
+            # FFN (similar pattern)
             if layer_idx < len(self.merged_ffn_modules) and self.merged_ffn_modules[layer_idx] is not None:
-                # Create LoRAMlp wrapper
+                merged_ffn_module = self.merged_ffn_modules[layer_idx]
+                
                 lora_mlp = LoRAMlp(
-                    original_mlp=block.mlp,
+                    original_mlp=original_mlp,
                     hidden_dim=self.hidden_dim,
                     mlp_dim=self.mlp_dim,
                     lora_rank=self.lora_rank,
@@ -446,45 +437,27 @@ class OrthogonalMergedBlock(nn.Module):
                     lora_dropout=0.1
                 )
                 
-                # Replace with our merged adapter
-                merged_ffn = self.merged_ffn_modules[layer_idx]
+                if task_id and task_id in merged_ffn_module.task_fc1:
+                    # Task-specific
+                    lora_mlp.lora_fc1 = merged_ffn_module.task_fc1[task_id]
+                    lora_mlp.lora_fc2 = merged_ffn_module.task_fc2[task_id]
+                else:
+                    # Merged
+                    if merged_ffn_module.fc1_module:
+                        lora_mlp.lora_fc1 = merged_ffn_module.fc1_module
+                    if merged_ffn_module.fc2_module:
+                        lora_mlp.lora_fc2 = merged_ffn_module.fc2_module
                 
-                def custom_mlp_forward(x):
-                    # First FC layer with LoRA
-                    h = lora_mlp.original_mlp.fc1(x)
-                    ffn_outputs = merged_ffn(fc1_input=x, task_id=task_id)
-                    if 'fc1' in ffn_outputs:
-                        h = h + ffn_outputs['fc1']
-                    
-                    h = lora_mlp.original_mlp.act(h)
-                    h = lora_mlp.original_mlp.drop1(h)
-                    
-                    # Second FC layer with LoRA
-                    h_pre = h
-                    h = lora_mlp.original_mlp.fc2(h)
-                    ffn_outputs = merged_ffn(fc2_input=h_pre, task_id=task_id)
-                    if 'fc2' in ffn_outputs:
-                        h = h + ffn_outputs['fc2']
-                    
-                    h = lora_mlp.original_mlp.drop2(h)
-                    return h
-                
-                lora_mlp.forward = custom_mlp_forward
                 block.mlp = lora_mlp
-    
+
     def remove_from_backbone(self, backbone: nn.Module):
         """
         Remove this block's LoRA modules from the backbone.
-        Restores original modules.
         """
-        for layer_idx, block in enumerate(backbone.blocks):
-            # Restore original attention if it was modified
-            if hasattr(block.attn, 'original_attn'):
-                block.attn = block.attn.original_attn
-            
-            # Restore original MLP if it was modified
-            if hasattr(block.mlp, 'original_mlp'):
-                block.mlp = block.mlp.original_mlp
+        if hasattr(self, '_stored_originals'):
+            for layer_idx, block in enumerate(backbone.blocks):
+                block.attn = self._stored_originals[layer_idx]['attn']
+                block.mlp = self._stored_originals[layer_idx]['mlp']
     
     def forward_with_backbone(self, x: torch.Tensor, backbone: nn.Module, 
                              task_id: Optional[str] = None) -> torch.Tensor:
