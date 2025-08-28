@@ -482,7 +482,6 @@ class OrthogonalMergedBlock(nn.Module):
         
         task_id = self.task_ids[task_index]
         
-        print(f"DEBUG: forward_task for {task_id} (index {task_index})")
         # Get features with task-specific LoRA
         features = self.forward_with_backbone(x, backbone, task_id)
         
@@ -490,7 +489,6 @@ class OrthogonalMergedBlock(nn.Module):
         task_head = self.get_task_head(task_id)
         if task_head is not None:
             logits = self.task_heads[task_id](features)
-            print(f"DEBUG: Logits shape for task {task_id}: {logits.shape}, max: {logits.max().item()}")
         else:
             print(f"ERROR: No task head found for task {task_id}")
             logits = torch.zeros(x.shape[0], 11, device=x.device)

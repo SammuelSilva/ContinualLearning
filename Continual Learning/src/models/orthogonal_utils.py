@@ -44,69 +44,63 @@ class OrthogonalProjector:
     def qr_orthogonalization(adapters: List) -> List[LoRALayer]:
         """
         Apply QR decomposition for orthogonal composition of LoRA adapters.
-        Simplified version that handles dimension mismatches better.
-        """
-        # Extract actual LoRA layers
+        """ 
         lora_adapters = OrthogonalProjector.extract_lora_layers(adapters)
         
-        if not lora_adapters:
-            return []
-        
-        # If only one adapter, return as is
-        if len(lora_adapters) == 1:
+        if len(lora_adapters) <= 1:
             return lora_adapters
         
-        orthogonal_adapters = []
-        
-        # Get dimensions
-        first_adapter = lora_adapters[0]
-        rank = first_adapter.rank
-        in_features = first_adapter.lora_A.shape[1]
-        out_features = first_adapter.lora_B.shape[0]
-        
-        # Create orthogonal vectors using Gram-Schmidt process
-        A_matrices = []
+        # Step 1: Compute effective weight updates (BA product)
+        weight_updates = []
         for adapter in lora_adapters:
-            A_matrices.append(adapter.lora_A.data.clone())
+            W = adapter.lora_B @ adapter.lora_A  # This is what actually modifies the model
+            weight_updates.append(W)
         
-        # Orthogonalize A matrices using Gram-Schmidt
-        orthogonal_As = []
-        for i, A in enumerate(A_matrices):
-            if i == 0:
-                # First matrix - just normalize
-                A_orth = A / (torch.norm(A) + 1e-8)
-            else:
-                # Orthogonalize against all previous matrices
-                A_orth = A.clone()
-                for j in range(i):
-                    prev_A = orthogonal_As[j]
-                    # Remove projection onto previous matrix
-                    for row in range(rank):
-                        projection = torch.dot(A_orth[row], prev_A[row]) / (torch.dot(prev_A[row], prev_A[row]) + 1e-8)
-                        A_orth[row] = A_orth[row] - projection * prev_A[row]
-                
-                # Normalize
-                A_orth = A_orth / (torch.norm(A_orth, dim=1, keepdim=True) + 1e-8)
+        # Step 2: Stack weight updates as columns
+        W_matrix = torch.stack([W.flatten() for W in weight_updates], dim=1)
+        
+        # Step 3: Apply QR decomposition to the stacked matrix
+        Q, R = torch.linalg.qr(W_matrix, mode='reduced')
+        
+        # Step 4: Reconstruct orthogonal weight updates
+        orthogonal_updates = []
+        for i in range(len(lora_adapters)):
+            W_orth = Q[:, i].reshape(weight_updates[0].shape) * R[i, i]  # Preserve magnitude
+            orthogonal_updates.append(W_orth)
+        
+        # Step 5: Decompose back into LoRA format (tricky part)
+        new_adapters = []
+        for i, (W_orth, original_adapter) in enumerate(zip(orthogonal_updates, lora_adapters)):
+            # Use SVD to decompose the orthogonal weight back into low-rank
+            U, S, Vt = torch.linalg.svd(W_orth, full_matrices=False)
             
-            orthogonal_As.append(A_orth)
-        
-        # Create new adapters with orthogonal A matrices
-        for i, (A_orth, original_adapter) in enumerate(zip(orthogonal_As, lora_adapters)):
+            rank = original_adapter.rank
             new_adapter = LoRALayer(
-                in_features=in_features,
-                out_features=out_features,
+                in_features=original_adapter.lora_A.shape[1],
+                out_features=original_adapter.lora_B.shape[0],
                 rank=rank,
                 alpha=original_adapter.alpha,
                 dropout=0.1
             )
             
-            new_adapter.lora_A.data = A_orth
-            new_adapter.lora_B.data = original_adapter.lora_B.data.clone()
+            # Set new weights that maintain orthogonality
+            new_adapter.lora_B.data = U[:, :rank] @ torch.diag(torch.sqrt(S[:rank]))
+            new_adapter.lora_A.data = torch.diag(torch.sqrt(S[:rank])) @ Vt[:rank, :]
             
-            orthogonal_adapters.append(new_adapter)
+            new_adapters.append(new_adapter)
         
-        return orthogonal_adapters
-    
+        # Verify orthogonality
+        verify_matrix = torch.stack([
+            (adapter.lora_B @ adapter.lora_A).flatten() 
+            for adapter in new_adapters
+        ], dim=1)
+        ortho_check = verify_matrix.T @ verify_matrix
+        print(f"Orthogonality verification (should be ~identity):")
+        print(f"  Diagonal mean: {torch.diag(ortho_check).mean():.3f}")
+        print(f"  Off-diagonal mean: {(ortho_check - torch.diag(torch.diag(ortho_check))).abs().mean():.3f}")
+        
+        return new_adapters
+       
     @staticmethod
     def svd_merge(adapters: List, target_rank: int) -> LoRALayer:
         """
