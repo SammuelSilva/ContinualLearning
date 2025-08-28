@@ -459,6 +459,10 @@ def compute_orthogonality_score(adapters: List) -> float:
     Args:
         adapters: List of LoRALayer or TaskSpecificLoRA objects
     """
+    print(f"[DEBUG ortho] Computing orthogonality for {len(adapters)} adapters")
+    for i, adapter in enumerate(adapters):
+        print(f"  Adapter {i} type: {type(adapter)}")
+
     if len(adapters) < 2:
         return 1.0
     

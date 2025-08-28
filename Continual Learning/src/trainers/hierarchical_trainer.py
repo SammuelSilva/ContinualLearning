@@ -382,7 +382,7 @@ class HierarchicalTrainer(ContinualTrainer):
     
         # Run OOD alignment if we have memory
         if len(self.memory_buffer) > 0:
-            self.align_ood_detection(self.memory_buffer, num_epochs=num_epochs)
+            self.align_ood_detection(self.memory_buffer, num_epochs=5)
 
         # Compute and store orthogonality score
         if len(self.model.active_block_tasks) > 1:
