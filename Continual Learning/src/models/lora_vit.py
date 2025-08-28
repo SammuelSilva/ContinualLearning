@@ -55,10 +55,6 @@ class LoRAAttention(nn.Module):
     def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, N, C = x.shape
         
-        print(f"\n[DEBUG LoRAAttention.forward] Input shape: {x.shape}")
-        print(f"  - self.original_attn type: {type(self.original_attn)}")
-        print(f"  - self.original_attn.qkv type: {type(self.original_attn.qkv)}")
-
         # Get Q, K, V from original attention
         self.qkv = self.original_attn.qkv(x).reshape(B, N, 3, self.original_attn.num_heads, C // self.original_attn.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = self.qkv.unbind(0)  # B, num_heads, N, head_dim
