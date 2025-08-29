@@ -105,7 +105,7 @@ class HierarchicalTrainer(ContinualTrainer):
         for epoch in range(num_epochs):
             # Training with cached features
             train_loss, train_acc = self._train_epoch_cached(
-                feature_loader, optimizer, task_id
+                feature_loader, optimizer, task_id, params
             )
             
             # Validation with cached features
@@ -170,7 +170,8 @@ class HierarchicalTrainer(ContinualTrainer):
         self,
         feature_loader: DataLoader,
         optimizer: torch.optim.Optimizer,
-        task_id: str
+        task_id: str,
+        params
     ) -> Tuple[float, float]:
         """
         Train epoch using pre-cached features (GPU efficient)
