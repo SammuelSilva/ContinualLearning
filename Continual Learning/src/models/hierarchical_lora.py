@@ -393,6 +393,23 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
         
         return stats
     
+    def visualize_hierarchy(self):
+        print("\n" + "="*60)
+        print("HIERARCHICAL STRUCTURE")
+        print("\n" + "="*60)
+
+        for i, block in enumerate(self.merged_blocks):
+            print(f"\nBlock {i} (merged)")
+            for task_id in block.task_ids:
+                print(f" |___ task_id[{task_id}]")
+        
+        if self.specialist_tasks:
+            print(f"\nSpecialists (unmerged)")
+            for task_id in self.specialist_tasks.keys():
+                print(f" |___ task_id[{task_id}]")
+
+        print("\n" + "="*60)
+        
     def save_checkpoint(self, path: str):
         """Save complete model checkpoint"""
         checkpoint = {
