@@ -2,6 +2,7 @@
 import json
 import numpy as np
 import torch
+from dataclasses import dataclass
 
 class NumpyJSONEncoder(json.JSONEncoder):
     """Custom JSON encoder that handles NumPy arrays and other non-serializable types"""
@@ -23,3 +24,14 @@ class NumpyJSONEncoder(json.JSONEncoder):
             except:
                 return str(obj)
         return super().default(obj)
+
+@dataclass
+class MergeConfig:
+    """Configuration for intelligent merging"""
+    similarity_threshold: float = 0.8
+    trim_percentage: float = 0.1
+    max_accuracy_drop: float = 2.0
+    max_rejection_drop: float = 4.0
+    max_fp_increase: float = 2.0
+    ablation_samples: int = 1000
+    promotion_threshold: float = 10.0

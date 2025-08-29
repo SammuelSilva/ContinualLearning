@@ -2,245 +2,292 @@
 Advanced merging strategies for hierarchical LoRA.
 """
 
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from typing import Dict, List, Optional, Tuple
-from src.models.orthogonal_utils import OrthogonalLoRAMerger, compute_orthogonality_score
 
+from dataclasses import dataclass
+from typing import Dict, Optional
+from src.utils.helpers import MergeConfig
 
-class AdaptiveMergeStrategy:
+class IntelligentLoRAMerger:
     """
-    Adaptive merging that decides when and how to merge based on task similarity.
+    Merger that validates using memory buffer data
     """
     
-    def __init__(
-        self,
-        similarity_threshold: float = 0.7,
-        min_tasks_for_merge: int = 3,
-        max_tasks_for_merge: int = 7
-    ):
-        self.similarity_threshold = similarity_threshold
-        self.min_tasks = min_tasks_for_merge
-        self.max_tasks = max_tasks_for_merge
-        self.merger = OrthogonalLoRAMerger()
+    def __init__(self, config: MergeConfig = None):
+        self.config = config or MergeConfig()
     
-    def should_merge(
-        self,
-        task_adapters: Dict,
-        task_performances: Dict[str, float]
-    ) -> bool:
+    @dataclass
+    class PerformanceMetrics:
+        accuracy: float
+        rejection_rate: float
+        fp_rate: float
+    
+    def validate_merge_with_buffer(self,
+                                  original_loras: Dict[str, nn.Module],
+                                  merged_lora: nn.Module,
+                                  memory_buffer,
+                                  backbone: nn.Module,
+                                  task_heads: Dict[str, nn.Module]) -> bool:
         """
-        Decide if current tasks should be merged.
-        
-        Args:
-            task_adapters: Current task adapters
-            task_performances: Performance metrics for each task
-            
-        Returns:
-            Boolean indicating whether to merge
+        Validate merge using memory buffer data
         """
-        num_tasks = len(task_adapters)
-        
-        # Check task count constraints
-        if num_tasks < self.min_tasks:
-            return False
-        if num_tasks >= self.max_tasks:
+        if memory_buffer is None or len(memory_buffer) == 0:
+            print("  Warning: No memory buffer for validation, accepting merge")
             return True
         
-        # Check performance stability
-        perf_values = list(task_performances.values())
-        perf_variance = np.var(perf_values)
+        all_valid = True
         
-        # Low variance suggests similar tasks - good for merging
-        if perf_variance < 0.01:  # Less than 1% variance
-            return True
-        
-        # Check orthogonality score
-        adapters = list(task_adapters.values())
-        ortho_score = compute_orthogonality_score(adapters)
-        
-        # High orthogonality means tasks are different - wait for more
-        if ortho_score > 0.9:
-            return False
-        
-        return True
-    
-    def select_merge_strategy(
-        self,
-        task_adapters: Dict,
-        memory_constraint: Optional[int] = None
-    ) -> str:
-        """
-        Select optimal merge strategy based on task characteristics.
-        
-        Returns:
-            Strategy name: 'qr', 'svd', 'gram_schmidt', or 'blockwise'
-        """
-        num_tasks = len(task_adapters)
-        adapters = list(task_adapters.values())
-        
-        # Compute characteristics
-        ortho_score = compute_orthogonality_score(adapters)
-        total_rank = sum(a.rank for a in adapters)
-        
-        # Decision logic
-        if memory_constraint and total_rank > memory_constraint:
-            # Need compression - use SVD
-            return 'svd'
-        elif ortho_score > 0.8:
-            # Already quite orthogonal - simple QR is enough
-            return 'qr'
-        elif num_tasks <= 3:
-            # Few tasks - can afford block diagonal
-            return 'blockwise'
-        else:
-            # General case - Gram-Schmidt
-            return 'gram_schmidt'
-
-
-class ProgressiveMergeScheduler:
-    """
-    Schedules merging operations throughout training.
-    """
-    
-    def __init__(
-        self,
-        initial_block_size: int = 3,
-        growth_factor: float = 1.5,
-        max_block_size: int = 10
-    ):
-        self.initial_block_size = initial_block_size
-        self.growth_factor = growth_factor
-        self.max_block_size = max_block_size
-        self.current_block_size = initial_block_size
-        self.merge_history = []
-    
-    def get_next_merge_point(self, current_task: int) -> int:
-        """
-        Determine when the next merge should occur.
-        
-        Args:
-            current_task: Current task index
+        for task_id, original_lora in original_loras.items():
+            print(f"    Validating task {task_id}...")
             
-        Returns:
-            Task index at which to perform next merge
-        """
-        if not self.merge_history:
-            return self.initial_block_size
-        
-        last_merge = self.merge_history[-1]
-        tasks_since_merge = current_task - last_merge
-        
-        # Adaptive block size
-        if tasks_since_merge >= self.current_block_size:
-            # Increase block size for next merge
-            self.current_block_size = min(
-                int(self.current_block_size * self.growth_factor),
-                self.max_block_size
+            # Get task data from memory buffer
+            task_data = self._get_task_data_from_buffer(
+                memory_buffer, task_id, self.config.validation_samples_per_task
             )
-            return current_task
-        
-        return last_merge + self.current_block_size
-    
-    def record_merge(self, task_index: int, merge_info: Dict):
-        """Record a merge operation."""
-        self.merge_history.append(task_index)
-
-
-class TaskSimilarityAnalyzer:
-    """
-    Analyzes similarity between tasks to guide merging decisions.
-    """
-    
-    @staticmethod
-    def compute_gradient_similarity(
-        task1_grads: Dict[str, torch.Tensor],
-        task2_grads: Dict[str, torch.Tensor]
-    ) -> float:
-        """
-        Compute cosine similarity between task gradients.
-        """
-        similarity_scores = []
-        
-        for key in task1_grads.keys():
-            if key in task2_grads:
-                grad1 = task1_grads[key].flatten()
-                grad2 = task2_grads[key].flatten()
-                
-                cos_sim = F.cosine_similarity(
-                    grad1.unsqueeze(0),
-                    grad2.unsqueeze(0)
-                ).item()
-                
-                similarity_scores.append(cos_sim)
-        
-        return np.mean(similarity_scores) if similarity_scores else 0.0
-    
-    @staticmethod
-    def compute_feature_similarity(
-        task1_features: torch.Tensor,
-        task2_features: torch.Tensor
-    ) -> float:
-        """
-        Compute similarity between task feature representations.
-        """
-        # Compute centroids
-        centroid1 = task1_features.mean(dim=0)
-        centroid2 = task2_features.mean(dim=0)
-        
-        # Cosine similarity between centroids
-        similarity = F.cosine_similarity(
-            centroid1.unsqueeze(0),
-            centroid2.unsqueeze(0)
-        ).item()
-        
-        return similarity
-    
-    @staticmethod
-    def cluster_tasks(
-        task_features: Dict[str, torch.Tensor],
-        num_clusters: Optional[int] = None
-    ) -> Dict[str, int]:
-        """
-        Cluster tasks based on their feature representations.
-        
-        Returns:
-            Dictionary mapping task_id to cluster_id
-        """
-        from sklearn.cluster import KMeans, AgglomerativeClustering
-        from sklearn.metrics import silhouette_score
-        
-        # Extract centroids
-        centroids = []
-        task_ids = []
-        for task_id, features in task_features.items():
-            centroid = features.mean(dim=0).cpu().numpy()
-            centroids.append(centroid)
-            task_ids.append(task_id)
-        
-        centroids = np.array(centroids)
-        
-        # Determine optimal number of clusters if not specified
-        if num_clusters is None:
-            scores = []
-            for k in range(2, min(len(task_ids), 6)):
-                kmeans = KMeans(n_clusters=k, random_state=42)
-                labels = kmeans.fit_predict(centroids)
-                score = silhouette_score(centroids, labels)
-                scores.append((k, score))
+            ood_data = self._get_ood_data_from_buffer(
+                memory_buffer, task_id, self.config.validation_samples_per_task
+            )
             
-            num_clusters = max(scores, key=lambda x: x[1])[0]
+            if task_data is None:
+                print(f"      No data for {task_id} in buffer, skipping validation")
+                continue
+            
+            # Evaluate original
+            original_metrics = self._calculate_metrics_from_buffer(
+                original_lora,
+                task_data,
+                ood_data,
+                backbone,
+                task_heads[task_id]
+            )
+            
+            # Evaluate merged
+            merged_metrics = self._calculate_metrics_from_buffer(
+                merged_lora,
+                task_data,
+                ood_data,
+                backbone,
+                task_heads[task_id]
+            )
+            
+            # Check thresholds
+            acc_drop = original_metrics.accuracy - merged_metrics.accuracy
+            rej_drop = original_metrics.rejection_rate - merged_metrics.rejection_rate
+            fp_increase = merged_metrics.fp_rate - original_metrics.fp_rate
+            
+            print(f"      Original: Acc={original_metrics.accuracy:.1f}%, "
+                  f"Rej={original_metrics.rejection_rate:.1f}%, FP={original_metrics.fp_rate:.1f}%")
+            print(f"      Merged:   Acc={merged_metrics.accuracy:.1f}%, "
+                  f"Rej={merged_metrics.rejection_rate:.1f}%, FP={merged_metrics.fp_rate:.1f}%")
+            
+            if (acc_drop > self.config.max_accuracy_drop or
+                rej_drop > self.config.max_rejection_drop or
+                fp_increase > self.config.max_fp_increase):
+                
+                print(f"      ❌ Failed (Acc↓{acc_drop:.1f}%, Rej↓{rej_drop:.1f}%, FP↑{fp_increase:.1f}%)")
+                all_valid = False
+                break
+            else:
+                print(f"      ✅ Passed")
         
-        # Perform clustering
-        clustering = AgglomerativeClustering(n_clusters=num_clusters)
-        cluster_labels = clustering.fit_predict(centroids)
+        return all_valid
+    
+    def _get_task_data_from_buffer(self, memory_buffer, task_id: str, num_samples: int):
+        """
+        Get in-domain data for a task from memory buffer
+        """
+        all_data = memory_buffer.get_all_data()
         
-        # Create mapping
-        task_to_cluster = {
-            task_id: int(cluster_id)
-            for task_id, cluster_id in zip(task_ids, cluster_labels)
-        }
+        # Filter for this task
+        task_indices = [i for i, tid in enumerate(all_data['task_ids']) 
+                       if tid == task_id]
         
-        return task_to_cluster
+        if not task_indices:
+            return None
+        
+        # Sample subset
+        if len(task_indices) > num_samples:
+            task_indices = random.sample(task_indices, num_samples)
+        
+        images = torch.stack([all_data['images'][i] for i in task_indices])
+        labels = torch.tensor([all_data['labels'][i] for i in task_indices])
+        
+        return {'images': images, 'labels': labels}
+    
+    def _get_ood_data_from_buffer(self, memory_buffer, task_id: str, num_samples: int):
+        """
+        Get OOD data (from other tasks) from memory buffer
+        """
+        all_data = memory_buffer.get_all_data()
+        
+        # Filter for other tasks
+        ood_indices = [i for i, tid in enumerate(all_data['task_ids']) 
+                      if tid != task_id]
+        
+        if not ood_indices:
+            return None
+        
+        # Sample subset
+        if len(ood_indices) > num_samples:
+            ood_indices = random.sample(ood_indices, num_samples)
+        
+        images = torch.stack([all_data['images'][i] for i in ood_indices])
+        labels = torch.tensor([all_data['labels'][i] for i in ood_indices])
+        
+        return {'images': images, 'labels': labels}
+    
+    def _calculate_metrics_from_buffer(self,
+                                      lora: nn.Module,
+                                      in_domain_data: Dict,
+                                      ood_data: Optional[Dict],
+                                      backbone: nn.Module,
+                                      task_head: nn.Module) -> PerformanceMetrics:
+        """
+        Calculate metrics using buffer data
+        """
+        device = next(backbone.parameters()).device
+        
+        # Temporarily inject LoRA
+        original_state = self._save_backbone_state(backbone)
+        self._inject_lora_into_backbone(lora, backbone)
+        
+        backbone.eval()
+        task_head.eval()
+        
+        # In-domain accuracy
+        correct_known = 0
+        total_known = 0
+        false_positives = 0
+        
+        with torch.no_grad():
+            # Process in batches
+            batch_size = 32
+            images = in_domain_data['images']
+            labels = in_domain_data['labels']
+            
+            for i in range(0, len(images), batch_size):
+                batch_images = images[i:i+batch_size].to(device)
+                batch_labels = labels[i:i+batch_size].to(device)
+                
+                features = backbone(batch_images)
+                logits = task_head(features)
+                
+                known_logits = logits[:, :-1]
+                unknown_logits = logits[:, -1]
+                
+                predictions = torch.argmax(known_logits, dim=1)
+                
+                for j in range(len(batch_labels)):
+                    if unknown_logits[j] < torch.max(known_logits[j]):
+                        if predictions[j] == batch_labels[j]:
+                            correct_known += 1
+                        total_known += 1
+                    else:
+                        false_positives += 1
+                        total_known += 1
+        
+        # OOD rejection rate
+        correct_unknown = 0
+        total_unknown = 0
+        
+        if ood_data:
+            with torch.no_grad():
+                images = ood_data['images']
+                
+                for i in range(0, len(images), batch_size):
+                    batch_images = images[i:i+batch_size].to(device)
+                    
+                    features = backbone(batch_images)
+                    logits = task_head(features)
+                    
+                    unknown_logits = logits[:, -1]
+                    known_logits = logits[:, :-1]
+                    
+                    for j in range(len(batch_images)):
+                        if unknown_logits[j] > torch.max(known_logits[j]):
+                            correct_unknown += 1
+                        total_unknown += 1
+        
+        # Restore backbone
+        self._restore_backbone_state(backbone, original_state)
+        
+        # Calculate metrics
+        accuracy = (correct_known / max(1, total_known)) * 100
+        rejection_rate = (correct_unknown / max(1, total_unknown)) * 100 if total_unknown > 0 else 100.0
+        fp_rate = (false_positives / max(1, total_known)) * 100
+        
+        return self.PerformanceMetrics(accuracy, rejection_rate, fp_rate)
+    
+    def _save_backbone_state(self, backbone):
+        """Save backbone state before modification"""
+        saved = {}
+        for idx, block in enumerate(backbone.blocks):
+            saved[idx] = {'attn': block.attn, 'mlp': block.mlp}
+        return saved
+    
+    def _inject_lora_into_backbone(self, lora, backbone):
+        """Inject LoRA for validation"""
+        from src.models.lora_vit import LoRAAttention
+        
+        for idx, block in enumerate(backbone.blocks):
+            if hasattr(block.attn, 'qkv'):
+                hidden_dim = block.attn.qkv.in_features
+                
+                lora_attn = LoRAAttention(
+                    original_attn=block.attn,
+                    hidden_dim=hidden_dim,
+                    lora_rank=lora.rank if hasattr(lora, 'rank') else 4,
+                    lora_alpha=lora.alpha if hasattr(lora, 'alpha') else 4.0,
+                    lora_dropout=0.1,
+                    target_modules=["q", "v"]
+                )
+                
+                lora_attn.lora_adapters["q"] = lora
+                lora_attn.lora_adapters["v"] = lora
+                
+                block.attn = lora_attn
+    
+    def _restore_backbone_state(self, backbone, original_state):
+        """Restore backbone to original state"""
+        for idx, block in enumerate(backbone.blocks):
+            if idx in original_state:
+                block.attn = original_state[idx]['attn']
+                block.mlp = original_state[idx]['mlp']
+
+        
+
+def integrate_intelligent_merge(hierarchical_model, validation_loaders=None):
+    """
+    Complete integration function
+    """
+    if len(hierarchical_model.active_block_tasks) < 2:
+        print("Not enough tasks to merge")
+        return [], []
+    
+    # Prepare validation data
+    validation_data = {}
+    if validation_loaders:
+        for task_id in hierarchical_model.active_block_tasks:
+            if task_id in validation_loaders:
+                validation_data[task_id] = {
+                    'in_domain': validation_loaders[task_id]['in_domain'],
+                    'out_domain': validation_loaders[task_id]['ood']
+                }
+    
+    # Store validation data in model
+    for task_id, data in validation_data.items():
+        hierarchical_model.task_validation_data[task_id] = data
+    
+    # Trigger merge
+    success = hierarchical_model._intelligent_merge_current_block()
+    
+    if success:
+        print("\n✅ Intelligent merge completed successfully!")
+        return hierarchical_model.merged_blocks, []
+    else:
+        print("\n⚠️ Some merges failed validation, tasks kept separate")
+        return hierarchical_model.merged_blocks, hierarchical_model.active_block_tasks.keys()

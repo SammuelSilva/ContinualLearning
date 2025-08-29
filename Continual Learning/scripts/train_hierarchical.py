@@ -66,18 +66,22 @@ def parse_args():
     # Hierarchical arguments
     parser.add_argument('--use_hierarchical', action='store_true',
                        help='Use hierarchical architecture with block merging')
-    parser.add_argument('--tasks_per_block', type=int, default=5,
-                       help='Number of tasks before merging into orthogonal block')
-    parser.add_argument('--use_orthogonal_merge', action='store_true',
-                       help='Apply orthogonal composition when merging')
-    parser.add_argument('--merge_strategy', type=str, default='qr',
-                       choices=['qr', 'svd', 'gram_schmidt', 'blockwise', 'adaptive'],
-                       help='Merging strategy for orthogonal composition')
-    parser.add_argument('--adaptive_merge', action='store_true',
-                       help='Use adaptive merging based on task similarity')
-    parser.add_argument('--progressive_merge', action='store_true',
-                       help='Use progressive merge scheduling')
-    
+    parser.add_argument('--max_tasks_per_block', type=int, default=2,
+                       help='Maximum tasks allowed per block')
+    parser.add_argument('--min_tasks_to_merge', type=int, default=2,
+                       help='Minimum tasks needed to attempt merge')
+    parser.add_argument('--similarity_threshold', type=float, default=0.8,
+                       help='Cosine similarity threshold for grouping')
+    parser.add_argument('--trim_percentage', type=float, default=0.1,
+                       help='Percentage of weights to keep in TIES')
+    parser.add_argument('--max_accuracy_drop', type=float, default=2.0,
+                       help='Maximum accuracy drop allowed')
+    parser.add_argument('--max_rejection_drop', type=float, default=4.0,
+                       help='Maximum rejection rate drop allowed')
+    parser.add_argument('--max_fp_increase', type=float, default=2.0,
+                       help='Maximum false positive increase allowed')
+    parser.add_argument('--ablation_samples', type=int, default=1000,
+                       help='Number of samples for ablation search')    
     # Data arguments
     parser.add_argument('--data_root', type=str, default='./data',
                        help='Root directory for datasets')
@@ -180,13 +184,18 @@ def create_model(args) -> torch.nn.Module:
     """Create model based on arguments"""
     
     if args.use_hierarchical:
-        print("🚀 Creating Hierarchical LoRA-ViT with Orthogonal Merging")
+        print("🚀 Creating Hierarchical LoRA-ViT with Intelligent TIES Merging")
         
-        # Handle adaptive merge strategy
-        merge_strategy = args.merge_strategy
-        if args.adaptive_merge:
-            merge_strategy = "adaptive"
-        
+        from src.models.merge_strategies import MergeConfig
+        merge_config = MergeConfig(
+            similarity_threshold=args.similarity_threshold,
+            trim_percentage=args.trim_percentage,
+            max_accuracy_drop=args.max_accuracy_drop,
+            max_rejection_drop=args.max_rejection_drop,
+            max_fp_increase=args.max_fp_increase,
+            ablation_samples=args.ablation_samples
+        )
+
         model = HierarchicalLoRAViT(
             vit_model_name=args.model_name,
             lora_rank=args.lora_rank,
@@ -194,28 +203,16 @@ def create_model(args) -> torch.nn.Module:
             lora_dropout=args.lora_dropout,
             lora_config=args.lora_config,
             use_pretrained=True,
-            tasks_per_block=args.tasks_per_block,
-            use_orthogonal_merge=args.use_orthogonal_merge
+            max_tasks_per_block=args.tasks_per_block,
+            min_tasks_to_merge=args.min_tasks_to_merge,
+            merge_config=merge_config
         )
-        
-        # Set merge strategy
-        model.merge_strategy = merge_strategy
-        
+
         print(f"  - Tasks per block: {args.tasks_per_block}")
-        print(f"  - Merge strategy: {merge_strategy}")
         print(f"  - Orthogonal merge: {args.use_orthogonal_merge}")
-        
     else:
-        print("📚 Creating Standard Continual LoRA-ViT")
-        
-        model = ContinualLoRAViT(
-            vit_model_name=args.model_name,
-            lora_rank=args.lora_rank,
-            lora_alpha=args.lora_alpha,
-            lora_dropout=args.lora_dropout,
-            lora_config=args.lora_config,
-            use_pretrained=True
-        )
+        print("Error: Hierarchical LoRA is not enabled")
+        return None
     
     print(f"  - Model: {args.model_name}")
     print(f"  - LoRA rank: {args.lora_rank}")
@@ -289,16 +286,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
     visualizer = None
     if args.visualize:
         visualizer = HierarchicalVisualizer(save_dir=args.experiment_dir)
-    
-    # Progressive merge scheduler
-    merge_scheduler = None
-    if args.progressive_merge and args.use_hierarchical:
-        merge_scheduler = ProgressiveMergeScheduler(
-            initial_block_size=3,
-            growth_factor=1.5,
-            max_block_size=args.tasks_per_block * 2
-        )
-    
+        
     # Track metrics
     all_results = {}
     task_accuracies = {}
@@ -319,24 +307,16 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         logger.info(f"\n{'='*60}")
         logger.info(f"TASK {task_idx + 1}/{args.num_tasks}: {task_id}")
         logger.info(f"{'='*60}")
-        
-        # Add task to model
-        model.add_task(task_id, args.classes_per_task)
-        
+                
         # Get data loaders
         train_loader, val_loader, test_loader = dataset.get_task_loaders(
             task_idx,
             batch_size=args.batch_size,
             num_workers=args.num_workers
         )
-        
-        # Check if should merge (for progressive scheduling)
-        if merge_scheduler and args.use_hierarchical:
-            if task_idx == merge_scheduler.get_next_merge_point(task_idx):
-                logger.info(f"Progressive merge triggered at task {task_idx}")
-                if hasattr(model, '_merge_current_block'):
-                    model._merge_current_block()
-                merge_scheduler.record_merge(task_idx, {'tasks_merged': len(model.active_block_tasks)})
+
+        # Add task with validation data
+        model.add_task(task_id, args.classes_per_task)
         
         # Train on current task
         logger.info(f"Training on {task_id}...")
