@@ -365,9 +365,11 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             stats = model.get_statistics()
             logger.info(f"\nHierarchical Statistics:")
             logger.info(f"  - Merged blocks: {stats['num_merged_blocks']}")
-            logger.info(f"  - Tasks in active block: {stats['tasks_in_active_block']}")
+            logger.info(f"  - Specialist tasks (unmerged): {stats["specialist_tasks"]}")
             logger.info(f"  - Total tasks: {stats['total_tasks']}")
-            
+            logger.info(f"  - Merge attempts: {stats['merge_attempts']}")
+            logger.info(f"  - Successful merges: {stats['successful_merges']}")
+
             # Show hierarchy
             model.visualize_hierarchy()
     
