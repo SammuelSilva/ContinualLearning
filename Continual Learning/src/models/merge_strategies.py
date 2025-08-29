@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import numpy as np
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from src.utils.helpers import MergeConfig
 
 class IntelligentLoRAMerger:
@@ -117,6 +117,55 @@ class IntelligentLoRAMerger:
         labels = torch.tensor([all_data['labels'][i] for i in task_indices])
         
         return {'images': images, 'labels': labels}
+    
+    def group_adapters(self, all_loras: Dict[str, nn.Module]) -> List[List[str]]:
+        """
+        Group compatible LoRAs based on cosine similarity of their weight updates
+        """
+        # Calculate task vectors (flattened delta_W)
+        lora_vectors = {}
+        for task_id, lora in all_loras.items():
+            delta_W = self._compute_delta_W(lora)
+            lora_vectors[task_id] = delta_W.flatten()
+        
+        # Calculate pairwise cosine similarity
+        similarity_matrix = {}
+        task_ids = list(lora_vectors.keys())
+        
+        for i, task_i in enumerate(task_ids):
+            similarity_matrix[task_i] = {}
+            for j, task_j in enumerate(task_ids):
+                if i == j:
+                    similarity_matrix[task_i][task_j] = 1.0
+                else:
+                    vec_i = lora_vectors[task_i]
+                    vec_j = lora_vectors[task_j]
+                    cos_sim = F.cosine_similarity(vec_i.unsqueeze(0), 
+                                                vec_j.unsqueeze(0)).item()
+                    similarity_matrix[task_i][task_j] = cos_sim
+        
+        # Form groups based on threshold
+        groups = []
+        used_loras = set()
+        
+        for task_i in task_ids:
+            if task_i not in used_loras:
+                current_group = [task_i]
+                used_loras.add(task_i)
+                
+                for task_j in task_ids:
+                    if task_j not in used_loras:
+                        if similarity_matrix[task_i][task_j] > self.config.similarity_threshold:
+                            current_group.append(task_j)
+                            used_loras.add(task_j)
+                
+                groups.append(current_group)
+        
+        print(f"Formed {len(groups)} groups from {len(all_loras)} LoRAs")
+        for i, group in enumerate(groups):
+            print(f"  Group {i}: {group}")
+        
+        return groups
     
     def _get_ood_data_from_buffer(self, memory_buffer, task_id: str, num_samples: int):
         """
