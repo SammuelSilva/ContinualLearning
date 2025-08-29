@@ -1,5 +1,5 @@
 """
-Training script for Hierarchical LoRA-ViT with orthogonal merging.
+Training script for Hierarchical LoRA-ViT with TRIM merging.
 Supports both standard and hierarchical modes with comprehensive experiments.
 """
 
@@ -44,7 +44,7 @@ def setup_logging(experiment_dir: str):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Train Hierarchical LoRA-ViT with orthogonal merging'
+        description='Train Hierarchical LoRA-ViT with TRIM merging'
     )
     
     # Model arguments
@@ -208,7 +208,6 @@ def create_model(args) -> torch.nn.Module:
         )
 
         print(f"  - Tasks per block: {args.max_tasks_per_block}")
-        print(f"  - Orthogonal merge: {args.use_orthogonal_merge}")
     else:
         print("Error: Hierarchical LoRA is not enabled")
         return None
@@ -498,8 +497,6 @@ def print_summary(metrics, final_results, args):
     if args.use_hierarchical:
         print(f"Architecture: Hierarchical LoRA-ViT")
         print(f"  - Tasks per block: {args.max_tasks_per_block}")
-        print(f"  - Merge strategy: {args.merge_strategy}")
-        print(f"  - Orthogonal merge: {args.use_orthogonal_merge}")
     else:
         print(f"Architecture: Standard Continual LoRA-ViT")
     
