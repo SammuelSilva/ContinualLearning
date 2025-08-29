@@ -370,9 +370,6 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             logger.info(f"  - Merge attempts: {stats['merge_attempts']}")
             logger.info(f"  - Successful merges: {stats['successful_merges']}")
 
-            # Show hierarchy
-            model.visualize_hierarchy()
-    
     # Final evaluation
     logger.info(f"\n{'='*60}")
     logger.info("FINAL EVALUATION ON ALL TASKS")
