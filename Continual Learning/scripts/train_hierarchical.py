@@ -202,12 +202,12 @@ def create_model(args) -> torch.nn.Module:
             lora_dropout=args.lora_dropout,
             lora_config=args.lora_config,
             use_pretrained=True,
-            max_tasks_per_block=args.tasks_per_block,
+            max_tasks_per_block=args.max_tasks_per_block,
             min_tasks_to_merge=args.min_tasks_to_merge,
             merge_config=merge_config
         )
 
-        print(f"  - Tasks per block: {args.tasks_per_block}")
+        print(f"  - Tasks per block: {args.max_tasks_per_block}")
         print(f"  - Orthogonal merge: {args.use_orthogonal_merge}")
     else:
         print("Error: Hierarchical LoRA is not enabled")
@@ -439,7 +439,7 @@ def create_visualizations(visualizer, model, trainer, task_idx, args):
         # Plot memory efficiency
         visualizer.plot_memory_efficiency(
             num_tasks=task_idx + 1,
-            tasks_per_block=args.tasks_per_block,
+            tasks_per_block=args.max_tasks_per_block,
             lora_rank=args.lora_rank,
             save_path=os.path.join(save_dir, 'memory_efficiency.png')
         )
@@ -497,7 +497,7 @@ def print_summary(metrics, final_results, args):
     
     if args.use_hierarchical:
         print(f"Architecture: Hierarchical LoRA-ViT")
-        print(f"  - Tasks per block: {args.tasks_per_block}")
+        print(f"  - Tasks per block: {args.max_tasks_per_block}")
         print(f"  - Merge strategy: {args.merge_strategy}")
         print(f"  - Orthogonal merge: {args.use_orthogonal_merge}")
     else:
@@ -609,7 +609,7 @@ def run_ablation_study(args):
         
         for block_size in block_sizes:
             print(f"\nTesting with {block_size} tasks per block...")
-            args.tasks_per_block = block_size
+            args.max_tasks_per_block = block_size
             args.experiment_name = f"ablation_blocks_{block_size}"
             main(args)
             
