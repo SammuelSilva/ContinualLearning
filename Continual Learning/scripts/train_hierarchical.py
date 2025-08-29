@@ -24,7 +24,6 @@ from src.data.memory_buffer import MemoryBuffer
 from src.trainers.hierarchical_trainer import HierarchicalTrainer
 from src.trainers.continual_trainer import ContinualTrainer
 from src.utils.visualization import HierarchicalVisualizer
-from src.models.merge_strategies import AdaptiveMergeStrategy, ProgressiveMergeScheduler    
 from src.utils.helpers import NumpyJSONEncoder
 
 def setup_logging(experiment_dir: str):
