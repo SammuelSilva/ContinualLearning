@@ -478,6 +478,9 @@ class HierarchicalTrainer(ContinualTrainer):
             results['task_accuracy'][true_task_id] = accuracy
             print(f"Task {true_task_id}: {accuracy:.2f}%")
         
+        if hasattr(self.model, "visualize_hierarchy"):
+            self.model.visualize_hierachy()
+            
         results['avg_accuracy'] = np.mean(list(results['task_accuracy'].values()))
         return results
     

@@ -340,10 +340,8 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             )
             test_loaders[f"task_{i}"] = test_loader_i
         
-        if args.use_hierarchical:
-            current_results = trainer.evaluate_hierarchical(test_loaders)
-        else:
-            current_results = trainer.evaluate_all_tasks(test_loaders)
+
+        current_results = trainer.evaluate_all_tasks(test_loaders)
         
         task_accuracies[task_idx] = current_results
         
