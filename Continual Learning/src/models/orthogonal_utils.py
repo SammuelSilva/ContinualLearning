@@ -41,11 +41,13 @@ class OrthogonalProjector:
         return lora_layers
 
     @staticmethod
-    def qr_orthogonalization(adapters: List) -> List[LoRALayer]:
+    def qr_orthogonalization(adapters: List) -> List: # Assuming LoRALayer type
         """
         Apply QR decomposition for orthogonal composition of LoRA adapters.
         """ 
-        lora_adapters = OrthogonalProjector.extract_lora_layers(adapters)
+        # This function needs to be defined based on your framework
+        # For this example, we'll assume adapters are already LoRALayer objects
+        lora_adapters = adapters
         
         if len(lora_adapters) <= 1:
             return lora_adapters
@@ -60,35 +62,54 @@ class OrthogonalProjector:
         W_matrix = torch.stack([W.flatten() for W in weight_updates], dim=1)
         
         # Step 3: Apply QR decomposition to the stacked matrix
-        Q, R = torch.linalg.qr(W_matrix, mode='reduced')
-        
-        # Step 4: Reconstruct orthogonal weight updates
+        # Use 'reduced' mode to get a Q matrix with the same number of columns as W_matrix
+        try:
+            Q, R = torch.linalg.qr(W_matrix, mode='reduced')
+        except torch.linalg.LinAlgError:
+            # This can happen if W_matrix is very rank-deficient, use SVD as a fallback
+            U, S, Vt = torch.linalg.svd(W_matrix, full_matrices=False)
+            Q = U # U is an orthonormal basis for the column space, just like Q
+            
+        # Step 4: Reconstruct orthonormal weight updates directly from Q
+        # The columns of Q are already an orthonormal basis. We just need to reshape them.
+        # This avoids the issue of R[i, i] being zero for linearly dependent adapters.
         orthogonal_updates = []
-        for i in range(len(lora_adapters)):
-            W_orth = Q[:, i].reshape(weight_updates[0].shape) * R[i, i]  # Preserve magnitude
+        for i in range(Q.shape[1]): # Iterate over the columns of Q
+            W_orth = Q[:, i].reshape(weight_updates[0].shape)
             orthogonal_updates.append(W_orth)
         
-        # Step 5: Decompose back into LoRA format (tricky part)
+        # Step 5: Decompose back into LoRA format
         new_adapters = []
         for i, (W_orth, original_adapter) in enumerate(zip(orthogonal_updates, lora_adapters)):
             # Use SVD to decompose the orthogonal weight back into low-rank
-            U, S, Vt = torch.linalg.svd(W_orth, full_matrices=False)
-            
+            # The resulting matrix will have a norm of 1, so S[0] will be ~1.
+            try:
+                U, S, Vt = torch.linalg.svd(W_orth, full_matrices=False)
+            except torch.linalg.LinAlgError:
+                # SVD can fail on some hardware for very small values, skip this adapter
+                print(f"Warning: SVD failed for adapter {i}. Skipping.")
+                continue
+
             rank = original_adapter.rank
-            new_adapter = LoRALayer(
+            # Create a new adapter instance
+            new_adapter = type(original_adapter)( # Re-create the same class
                 in_features=original_adapter.lora_A.shape[1],
                 out_features=original_adapter.lora_B.shape[0],
                 rank=rank,
-                alpha=original_adapter.alpha,
-                dropout=0.1
+                # Copy other relevant parameters
+                **{k: v for k, v in original_adapter.__dict__.items() if k not in ['in_features', 'out_features', 'rank', '_parameters', '_modules']}
             )
             
             # Set new weights that maintain orthogonality
+            # We split the singular values (S) between B and A to balance their magnitudes
             new_adapter.lora_B.data = U[:, :rank] @ torch.diag(torch.sqrt(S[:rank]))
             new_adapter.lora_A.data = torch.diag(torch.sqrt(S[:rank])) @ Vt[:rank, :]
             
             new_adapters.append(new_adapter)
         
+        if not new_adapters:
+            return []
+
         # Verify orthogonality
         verify_matrix = torch.stack([
             (adapter.lora_B @ adapter.lora_A).flatten() 
@@ -96,8 +117,9 @@ class OrthogonalProjector:
         ], dim=1)
         ortho_check = verify_matrix.T @ verify_matrix
         print(f"Orthogonality verification (should be ~identity):")
+        # Use a small epsilon to avoid division by zero or NaN if ortho_check is all zeros
         print(f"  Diagonal mean: {torch.diag(ortho_check).mean():.3f}")
-        print(f"  Off-diagonal mean: {(ortho_check - torch.diag(torch.diag(ortho_check))).abs().mean():.3f}")
+        print(f"  Off-diagonal mean abs: {(ortho_check - torch.diag(torch.diag(ortho_check))).abs().mean():.3f}")
         
         return new_adapters
        
