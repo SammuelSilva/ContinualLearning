@@ -110,7 +110,7 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
         available_specialists = {
             tid: self.task_adapters[tid] 
             for tid in self.specialist_tasks.keys()
-            if tid in self.task_adapters
+            if tid in self.task_adapters and self.specialist_tasks[tid]['trained']
         }
         
         if len(available_specialists) < self.min_tasks_to_merge:
@@ -340,6 +340,11 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
             if task_id in block.task_ids:
                 return True
         return False
+    
+    def mark_task_trained(self, task_id: str):
+        """Mark a task as trained after training completion"""
+        if task_id in self.specialist_tasks:
+            self.specialist_tasks[task_id]['trained'] = True
     
     def _print_status(self):
         """Print current model status"""
