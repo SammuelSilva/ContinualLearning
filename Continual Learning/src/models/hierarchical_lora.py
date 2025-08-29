@@ -395,7 +395,6 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
             'statistics': self.get_statistics(),
             'merge_config': self.merge_config,
             'specialist_tasks': self.specialist_tasks,
-            'task_validation_data': self.task_validation_data
         }
         torch.save(checkpoint, path)
         print(f"Checkpoint saved to {path}")
@@ -405,5 +404,4 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
         checkpoint = torch.load(path)
         self.load_state_dict(checkpoint['model_state'])
         self.specialist_tasks = checkpoint['specialist_tasks']
-        self.task_validation_data = checkpoint['task_validation_data']
         print(f"Checkpoint loaded from {path}")
