@@ -381,62 +381,16 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         
         # UPDATE MEMORY BUFFER with current task data
         if memory_buffer is not None:
-            print(f"\n📦 Updating memory buffer with {task_id} samples...")
-            
-            buffer_images = []
-            buffer_labels = []
-            buffer_features = [] if args.selection_strategy == 'herding' else None
-            
-            model.eval()
-            with torch.no_grad():
-                for batch_idx, batch_data in enumerate(train_loader):
-                    if batch_idx >= 5:  # Limit batches for buffer
-                        break
-                    
-                    if len(batch_data) == 3:
-                        images, labels, unknown_flags = batch_data
-                        # Only store known samples
-                        known_mask = (unknown_flags == 0)
-                        if known_mask.sum() == 0:
-                            continue
-                        images = images[known_mask]
-                        labels = labels[known_mask]
-                    else:
-                        images, labels = batch_data
-                    
-                    images = images.to(args.device)
-                    buffer_images.append(images.cpu())
-                    buffer_labels.append(labels.cpu())
-                    
-                    # Extract features if using herding
-                    if args.selection_strategy == 'herding':
-                        features = model.forward(images, task_id=task_id, return_features=True)
-                        if isinstance(features, dict):
-                            features = features.get('features', features)
-                        buffer_features.append(features.cpu())
-            
-            # Update buffer
-            if buffer_images:
-                all_images = torch.cat(buffer_images, dim=0)
-                all_labels = torch.cat(buffer_labels, dim=0)
-                all_features = torch.cat(buffer_features, dim=0) if buffer_features else None
-                
-                memory_buffer.update(
-                    images=all_images,
-                    labels=all_labels,
-                    task_id=task_id,
-                    features=all_features
+            if memory_buffer is not None:
+                update_memory_buffer_efficient(
+                    model, 
+                    memory_buffer, 
+                    train_loader, 
+                    task_id, 
+                    args,
+                    num_batches=5
                 )
-                
-                # Print buffer statistics
-                buffer_stats = memory_buffer.get_statistics()
-                print(f"  ✓ Buffer updated:")
-                print(f"    - Total samples: {buffer_stats['total_samples']}/{memory_buffer.buffer_size}")
-                print(f"    - Classes: {buffer_stats['num_classes']}")
-                print(f"    - Tasks: {buffer_stats['num_tasks']}")
-                for tid, count in buffer_stats['samples_per_task'].items():
-                    print(f"    - {tid}: {count} samples")
-        
+                    
         # EVALUATE ON BUFFER after updating (skip first task)
         if memory_buffer is not None and task_idx > 0 and len(memory_buffer) > 0:
             print(f"\n🔍 Evaluating model on memory buffer...")
@@ -914,6 +868,81 @@ def main(args=None):
     
     return results
 
-
+def update_memory_buffer_efficient(model, memory_buffer, train_loader, task_id, args, num_batches=5):
+    """
+    Memory-efficient buffer update - processes data in small chunks
+    """
+    if memory_buffer is None:
+        return
+    
+    print(f"\n📦 Updating memory buffer with {task_id} samples...")
+    
+    # Collect samples batch by batch without accumulating on GPU
+    all_images = []
+    all_labels = []
+    all_features = [] if args.selection_strategy == 'herding' else None
+    
+    model.eval()
+    device = next(model.parameters()).device
+    
+    with torch.no_grad():
+        for batch_idx, batch_data in enumerate(train_loader):
+            if batch_idx >= num_batches:
+                break
+            
+            # Extract data
+            if len(batch_data) == 3:
+                images, labels, unknown_flags = batch_data
+                known_mask = (unknown_flags == 0)
+                if known_mask.sum() == 0:
+                    continue
+                images = images[known_mask]
+                labels = labels[known_mask]
+            else:
+                images, labels = batch_data
+            
+            # Keep on CPU
+            all_images.append(images)
+            all_labels.append(labels)
+            
+            # Extract features if needed (process in small chunks)
+            if args.selection_strategy == 'herding':
+                chunk_size = 16  # Small chunk to avoid OOM
+                batch_features = []
+                
+                for i in range(0, len(images), chunk_size):
+                    chunk = images[i:i+chunk_size].to(device)
+                    feat = model.forward(chunk, task_id=task_id, return_features=True)
+                    if isinstance(feat, dict):
+                        feat = feat.get('features', feat)
+                    batch_features.append(feat.cpu())
+                    del chunk, feat
+                    
+                all_features.append(torch.cat(batch_features, dim=0))
+            
+            # Clear any GPU cache
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    
+    # Concatenate all CPU tensors
+    if all_images:
+        final_images = torch.cat(all_images, dim=0)
+        final_labels = torch.cat(all_labels, dim=0)
+        final_features = torch.cat(all_features, dim=0) if all_features else None
+        
+        # Update buffer (all on CPU)
+        memory_buffer.update(
+            images=final_images,
+            labels=final_labels,
+            task_id=task_id,
+            features=final_features
+        )
+        
+        # Print statistics
+        stats = memory_buffer.get_statistics()
+        print(f"  ✓ Buffer updated:")
+        print(f"    - Added {len(final_images)} samples")
+        print(f"    - Total: {stats['total_samples']}/{memory_buffer.buffer_size}")
+        
 if __name__ == "__main__":
     main()
