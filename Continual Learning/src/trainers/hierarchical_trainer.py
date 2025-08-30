@@ -171,6 +171,11 @@ class HierarchicalTrainer(ContinualTrainer):
                     
                     # Classification loss - Remove unknown class logit
                     class_logits = logits[:, :-1]  # Remove last column (unknown class)
+                    print(f"Logits shape: {logits.shape}")
+                    print(f"Labels shape: {labels.shape}")
+                    print(f"Labels dtype: {labels.dtype}")
+                    print(f"Labels range: {labels.min().item()} to {labels.max().item()}")
+
                     loss = F.cross_entropy(class_logits, labels)
                     
                     # Memory replay for preventing forgetting
