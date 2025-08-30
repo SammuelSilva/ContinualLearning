@@ -327,11 +327,17 @@ class HierarchicalTrainer(ContinualTrainer):
     def align_ood_detection_checkpoint(self, num_epochs=3, use_amp=True):
         """
         OOD alignment using gradient checkpointing
+        Train each head with:
+        - Its own task data: classify correctly into actual classes
+        - Other tasks' data: classify as "unknown"
         """
         if len(self.memory_buffer) == 0:
             return
         
         print(f"\n=== OOD Detection Alignment (Checkpoint-Based) ===")
+        
+        # Get device type
+        device_type = self.device.type if hasattr(self.device, 'type') else str(self.device).split(':')[0]
         
         # Collect all heads
         all_heads = []
@@ -352,61 +358,145 @@ class HierarchicalTrainer(ContinualTrainer):
             head_params.extend(head.parameters())
         
         optimizer = torch.optim.Adam(head_params, lr=1e-4)
-        scaler = GradScaler() if use_amp else None
+        scaler = GradScaler(device_type) if use_amp else None
         
         for epoch in range(num_epochs):
-            epoch_loss = 0
+            total_epoch_loss = 0
+            num_batches = 0
             
-            # Sample from memory
-            batch = self.memory_buffer.sample(batch_size=32)
-            if len(batch['images']) == 0:
+            # Sample from memory buffer (contains data from all previous tasks)
+            memory_batch = self.memory_buffer.sample(batch_size=32)
+            if len(memory_batch['images']) == 0:
                 continue
             
-            images = batch['images'].to(self.device)
+            mem_images = memory_batch['images'].to(self.device)
+            mem_labels = memory_batch['labels'].to(self.device)
+            mem_task_ids = memory_batch.get('task_ids', [])
             
-            optimizer.zero_grad()
-            
-            if use_amp:
-                with autocast(self.device.type):
-                    # Get features with checkpointing
-                    features = checkpoint(self.model.backbone, images, use_reentrant=False)
-                    
-                    total_loss = 0
-                    for task_id, head in all_heads:
+            # Train each head separately
+            for head_task_id, head in all_heads:
+                optimizer.zero_grad()
+                
+                if use_amp:
+                    with autocast(device_type):
+                        # Get features with checkpointing
+                        features = self._get_features_checkpoint(mem_images)
+                        
+                        # Get logits from this specific head
                         logits = head(features)
-                        unknown_labels = torch.full(
-                            (len(features),),
-                            logits.shape[1] - 1,
-                            device=self.device
-                        )
-                        loss = F.cross_entropy(logits, unknown_labels)
-                        total_loss += loss
+                        
+                        # Create labels: own task = actual class, other tasks = unknown
+                        target_labels = []
+                        for mem_label, mem_task_id in zip(mem_labels, mem_task_ids):
+                            if mem_task_id == head_task_id:
+                                # This is data from the head's own task - use actual label
+                                target_labels.append(mem_label.item())
+                            else:
+                                # This is data from other tasks - classify as unknown
+                                target_labels.append(logits.shape[1] - 1)  # Unknown class index
+                        
+                        target_labels = torch.tensor(target_labels, device=self.device)
+                        
+                        # Calculate loss
+                        loss = F.cross_entropy(logits, target_labels)
                     
-                    avg_loss = total_loss / len(all_heads)
-                
-                scaler.scale(avg_loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                features = checkpoint(self.model.backbone, images, use_reentrant=False)
-                
-                total_loss = 0
-                for task_id, head in all_heads:
+                    # Backward pass
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    # Standard precision
+                    features = self._get_features_checkpoint(mem_images)
                     logits = head(features)
-                    unknown_labels = torch.full(
-                        (len(features),),
-                        logits.shape[1] - 1,
-                        device=self.device
-                    )
-                    loss = F.cross_entropy(logits, unknown_labels)
-                    total_loss += loss
+                    
+                    # Create labels: own task = actual class, other tasks = unknown
+                    target_labels = []
+                    for mem_label, mem_task_id in zip(mem_labels, mem_task_ids):
+                        if mem_task_id == head_task_id:
+                            # This is data from the head's own task - use actual label
+                            target_labels.append(mem_label.item())
+                        else:
+                            # This is data from other tasks - classify as unknown
+                            target_labels.append(logits.shape[1] - 1)  # Unknown class index
+                    
+                    target_labels = torch.tensor(target_labels, device=self.device)
+                    
+                    # Calculate loss
+                    loss = F.cross_entropy(logits, target_labels)
+                    loss.backward()
+                    optimizer.step()
                 
-                avg_loss = total_loss / len(all_heads)
-                avg_loss.backward()
-                optimizer.step()
+                total_epoch_loss += loss.item()
+                num_batches += 1
             
-            epoch_loss = avg_loss.item()
-            print(f"  Epoch {epoch+1}/{num_epochs}: Loss = {epoch_loss:.4f}")
+            avg_epoch_loss = total_epoch_loss / max(1, num_batches)
+            print(f"  Epoch {epoch+1}/{num_epochs}: Avg Loss = {avg_epoch_loss:.4f}")
+            
+            # Optional: Print detailed breakdown
+            if epoch == 0:  # Print details for first epoch
+                self._print_ood_training_details(memory_batch, all_heads)
+
+    def _get_features_checkpoint(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Extract features from backbone using checkpointing
+        """
+        x = self.model.backbone.patch_embed(images)
+        
+        # Add class token if the model expects it
+        if hasattr(self.model.backbone, 'cls_token'):
+            cls_token = self.model.backbone.cls_token.expand(x.shape[0], -1, -1)
+            x = torch.cat((cls_token, x), dim=1)
+            
+        # Position embeddings
+        if hasattr(self.model.backbone, 'pos_drop'):
+            x = self.model.backbone.pos_drop(x + self.model.backbone.pos_embed)
+        
+        # Transformer blocks
+        for block in self.model.backbone.blocks:
+            if self.model.training:
+                x = checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
+        
+        x = self.model.backbone.norm(x)
+        
+        # Extract class token (first token) for classification
+        if hasattr(self.model.backbone, 'cls_token'):
+            cls_output = x[:, 0]  # Shape: [batch_size, embed_dim]
+        else:
+            cls_output = x.mean(dim=1)  # Global average pooling
+        
+        # Apply backbone head if it exists
+        if hasattr(self.model.backbone, 'head') and self.model.backbone.head is not None:
+            features = self.model.backbone.head(cls_output)
+        else:
+            features = cls_output
+        
+        return features
+
+    def _print_ood_training_details(self, memory_batch: dict, all_heads: list):
+        """
+        Print details about OOD training for debugging
+        """
+        mem_task_ids = memory_batch.get('task_ids', [])
+        mem_labels = memory_batch['labels']
+        
+        print(f"  Memory batch details:")
+        print(f"    Total samples: {len(mem_labels)}")
+        
+        # Count samples per task
+        task_counts = {}
+        for task_id in mem_task_ids:
+            task_counts[task_id] = task_counts.get(task_id, 0) + 1
+        
+        print(f"    Samples per task: {task_counts}")
+        
+        # Show what each head will learn
+        for head_task_id, _ in all_heads:
+            own_samples = sum(1 for tid in mem_task_ids if tid == head_task_id)
+            other_samples = len(mem_task_ids) - own_samples
+            print(f"    Head '{head_task_id}': {own_samples} own samples (classify correctly), "
+                f"{other_samples} other samples (classify as unknown)")
 
     def _update_memory_buffer(self, train_loader: DataLoader, task_id: str):
         """
