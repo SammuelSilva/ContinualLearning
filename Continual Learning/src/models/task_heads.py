@@ -33,7 +33,7 @@ class TaskHead(nn.Module):
         # Initialize
         nn.init.normal_(self.classifier.weight, std=0.02)
         nn.init.zeros_(self.classifier.bias)
-        self.classifier.bias.data[-1] = 2.0  # Positive bias for unknown
+        self.classifier.bias.data[-1] = -2.0  # Negative bias for unknown
 
         if torch.cuda.is_available():
             device = torch.device('cuda:0')
