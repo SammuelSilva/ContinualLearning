@@ -149,24 +149,30 @@ class HierarchicalTrainer:
         for batch_idx, batch_data in enumerate(pbar):
             # Handle different batch formats
             if len(batch_data) == 3:
-                # Mixed dataset with unknown flags
                 images, labels, unknown_flags = batch_data
                 images = images.to(self.device)
                 labels = labels.to(self.device)
-                unknown_flags = unknown_flags.to(self.device)
+                unknown_flags = unknown_flags.to(self.device).float()  # Ensure float
                 has_unknown = True
             else:
-                # Standard dataset
                 images, labels = batch_data
                 images = images.to(self.device)
                 labels = labels.to(self.device)
-                unknown_flags = torch.zeros_like(labels).float()
+                unknown_flags = torch.zeros_like(labels, dtype=torch.float)  # Explicit float type
                 has_unknown = False
             
             optimizer.zero_grad()
             
-            # Forward pass with hierarchical structure
+            # Forward pass
             outputs = self.model(images, task_id=task_id)
+            
+            # Ensure outputs['logits'] has correct shape
+            if 'logits' not in outputs:
+                raise ValueError("Model output must contain 'logits' key")
+            
+            logits = outputs['logits']
+            if logits.dim() != 2:
+                raise ValueError(f"Expected logits to be 2D tensor [batch_size, num_classes], got shape {logits.shape}")
             
             # Compute losses
             loss, loss_components = self._compute_loss(
@@ -183,31 +189,45 @@ class HierarchicalTrainer:
             total_loss += loss.item()
             
             # Calculate accuracy (excluding unknown samples for classification accuracy)
-            if has_unknown:
-                known_mask = (unknown_flags == 0)
-                if known_mask.sum() > 0:
-                    _, predicted = outputs['logits'][known_mask].max(1)
-                    correct += predicted.eq(labels[known_mask]).sum().item()
-                    total += known_mask.sum().item()
-                
-                # Calculate unknown detection metrics
-                unknown_scores = outputs.get('unknown_score', None)
-                if unknown_scores is not None:
-                    unknown_pred = (torch.sigmoid(unknown_scores) > 0.5).float().squeeze()
-                    unknown_tp += ((unknown_pred == 1) & (unknown_flags == 1)).sum().item()
-                    unknown_fp += ((unknown_pred == 1) & (unknown_flags == 0)).sum().item()
-                    unknown_tn += ((unknown_pred == 0) & (unknown_flags == 0)).sum().item()
-                    unknown_fn += ((unknown_pred == 0) & (unknown_flags == 1)).sum().item()
-            else:
-                _, predicted = outputs['logits'].max(1)
-                correct += predicted.eq(labels).sum().item()
-                total += labels.size(0)
+            with torch.no_grad():
+                if has_unknown:
+                    known_mask = (unknown_flags == 0)
+                    if known_mask.sum() > 0:
+                        known_logits = logits[known_mask]  # Shape: [num_known, num_classes]
+                        known_labels = labels[known_mask]   # Shape: [num_known]
+                        _, predicted = known_logits.max(1)
+                        correct += predicted.eq(known_labels).sum().item()
+                        total += known_mask.sum().item()
+                    
+                    # Calculate unknown detection metrics
+                    if 'unknown_score' in outputs:
+                        unknown_scores = outputs['unknown_score'].squeeze()
+                        if unknown_scores.dim() == 0:  # Handle single sample case
+                            unknown_scores = unknown_scores.unsqueeze(0)
+                        
+                        unknown_pred = (torch.sigmoid(unknown_scores) > 0.5).float()
+                        
+                        # Ensure same shape for comparison
+                        if unknown_pred.shape != unknown_flags.shape:
+                            if unknown_flags.dim() > unknown_pred.dim():
+                                unknown_pred = unknown_pred.squeeze()
+                            elif unknown_pred.dim() > unknown_flags.dim():
+                                unknown_flags = unknown_flags.squeeze()
+                        
+                        unknown_tp += ((unknown_pred == 1) & (unknown_flags == 1)).sum().item()
+                        unknown_fp += ((unknown_pred == 1) & (unknown_flags == 0)).sum().item()
+                        unknown_tn += ((unknown_pred == 0) & (unknown_flags == 0)).sum().item()
+                        unknown_fn += ((unknown_pred == 0) & (unknown_flags == 1)).sum().item()
+                else:
+                    _, predicted = logits.max(1)
+                    correct += predicted.eq(labels).sum().item()
+                    total += labels.size(0)
             
             # Update progress bar
             pbar.set_postfix({
-                'loss': loss.item(),
-                'acc': 100. * correct / total if total > 0 else 0,
-                'lr': scheduler.get_last_lr()[0]
+                'loss': f'{loss.item():.4f}',
+                'acc': f'{100. * correct / total:.1f}%' if total > 0 else '0.0%',
+                'lr': f'{scheduler.get_last_lr()[0]:.2e}'
             })
         
         # Calculate metrics
@@ -253,10 +273,11 @@ class HierarchicalTrainer:
         if has_unknown:
             known_mask = (unknown_flags == 0)
             if known_mask.sum() > 0:
-                classification_loss = F.cross_entropy(
-                    outputs['logits'][known_mask],
-                    labels[known_mask]
-                )
+                # FIX: Use boolean indexing correctly for 2D tensor
+                known_logits = outputs['logits'][known_mask]  # Shape: [num_known_samples, num_classes]
+                known_labels = labels[known_mask]              # Shape: [num_known_samples]
+                
+                classification_loss = F.cross_entropy(known_logits, known_labels)
                 loss_components['classification'] = classification_loss.item()
                 total_loss += self.lambda_classification * classification_loss
         else:
@@ -268,18 +289,17 @@ class HierarchicalTrainer:
         if has_unknown and 'unknown_score' in outputs:
             unknown_loss = F.binary_cross_entropy_with_logits(
                 outputs['unknown_score'].squeeze(),
-                unknown_flags,
-                pos_weight=torch.tensor([2.0]).to(self.device)  # Weight positive samples more
+                unknown_flags.float(),  # Ensure float type
+                pos_weight=torch.tensor([2.0]).to(self.device)
             )
             loss_components['unknown'] = unknown_loss.item()
             
             # Scale unknown loss based on task
-            unknown_weight = self.lambda_task_unknown * (0.9 ** task_idx)  # Decay for later tasks
+            unknown_weight = self.lambda_task_unknown * (0.9 ** task_idx)
             total_loss += unknown_weight * unknown_loss
         
         # Task-level unknown regularization
         if 'task_unknown_score' in outputs and task_idx > 0:
-            # Encourage the model to be uncertain about samples from other tasks
             task_unknown_loss = self._compute_task_unknown_loss(
                 outputs['task_unknown_score'],
                 task_id,
@@ -289,7 +309,7 @@ class HierarchicalTrainer:
             loss_components['task_unknown'] = task_unknown_loss.item()
             total_loss += self.lambda_task_unknown * task_unknown_loss
         
-        # Block-level unknown regularization (if using hierarchical)
+        # Block-level unknown regularization
         if 'block_unknown_score' in outputs:
             block_unknown_loss = self._compute_block_unknown_loss(
                 outputs['block_unknown_score'],
@@ -306,6 +326,7 @@ class HierarchicalTrainer:
             total_loss += 0.1 * outputs['orthogonal_loss']
         
         return total_loss, loss_components
+
     
     def _compute_task_unknown_loss(
         self,
@@ -373,16 +394,21 @@ class HierarchicalTrainer:
                     images, labels, unknown_flags = batch_data
                     images = images.to(self.device)
                     labels = labels.to(self.device)
-                    unknown_flags = unknown_flags.to(self.device)
+                    unknown_flags = unknown_flags.to(self.device).float()
                     has_unknown = True
                 else:
                     images, labels = batch_data
                     images = images.to(self.device)
                     labels = labels.to(self.device)
-                    unknown_flags = torch.zeros_like(labels).float()
+                    unknown_flags = torch.zeros_like(labels, dtype=torch.float)
                     has_unknown = False
                 
                 outputs = self.model(images, task_id=task_id)
+                
+                # Ensure logits has correct shape
+                logits = outputs['logits']
+                if logits.dim() != 2:
+                    raise ValueError(f"Expected logits to be 2D tensor, got shape {logits.shape}")
                 
                 # Compute loss
                 loss, _ = self._compute_loss(
@@ -394,19 +420,33 @@ class HierarchicalTrainer:
                 if has_unknown:
                     known_mask = (unknown_flags == 0)
                     if known_mask.sum() > 0:
-                        _, predicted = outputs['logits'][known_mask].max(1)
-                        correct += predicted.eq(labels[known_mask]).sum().item()
+                        known_logits = logits[known_mask]
+                        known_labels = labels[known_mask]
+                        _, predicted = known_logits.max(1)
+                        correct += predicted.eq(known_labels).sum().item()
                         total += known_mask.sum().item()
                     
                     # Calculate unknown detection metrics
                     if 'unknown_score' in outputs:
-                        unknown_pred = (torch.sigmoid(outputs['unknown_score']) > 0.5).float().squeeze()
+                        unknown_scores = outputs['unknown_score'].squeeze()
+                        if unknown_scores.dim() == 0:
+                            unknown_scores = unknown_scores.unsqueeze(0)
+                        
+                        unknown_pred = (torch.sigmoid(unknown_scores) > 0.5).float()
+                        
+                        # Ensure compatible shapes
+                        if unknown_pred.shape != unknown_flags.shape:
+                            if unknown_flags.dim() > unknown_pred.dim():
+                                unknown_pred = unknown_pred.squeeze()
+                            elif unknown_pred.dim() > unknown_flags.dim():
+                                unknown_flags = unknown_flags.squeeze()
+                        
                         unknown_tp += ((unknown_pred == 1) & (unknown_flags == 1)).sum().item()
                         unknown_fp += ((unknown_pred == 1) & (unknown_flags == 0)).sum().item()
                         unknown_tn += ((unknown_pred == 0) & (unknown_flags == 0)).sum().item()
                         unknown_fn += ((unknown_pred == 0) & (unknown_flags == 1)).sum().item()
                 else:
-                    _, predicted = outputs['logits'].max(1)
+                    _, predicted = logits.max(1)
                     correct += predicted.eq(labels).sum().item()
                     total += labels.size(0)
         
@@ -431,6 +471,7 @@ class HierarchicalTrainer:
             })
         
         return total_loss / len(val_loader), metrics
+
     
     def _get_scheduler(self, optimizer, total_steps, warmup_steps):
         """Get learning rate scheduler with warmup"""
