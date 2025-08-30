@@ -325,17 +325,14 @@ class HierarchicalTrainer(ContinualTrainer):
         # Combine losses
         return loss + 0.3 * memory_loss
 
-    def align_ood_detection_checkpoint(self, num_epochs=3, use_amp=True):
+    def align_ood_detection_checkpoint(self, num_epochs=2, use_amp=True):  # Reduced epochs
         """
-        OOD alignment using gradient checkpointing
-        Train each head with:
-        - Its own task data: classify correctly into actual classes
-        - Other tasks' data: classify as "unknown"
+        FIXED: More balanced OOD alignment with proper task routing validation
         """
         if len(self.memory_buffer) == 0:
             return
         
-        print(f"\n=== OOD Detection Alignment (Checkpoint-Based) ===")
+        print(f"\n=== OOD Detection Alignment (Balanced) ===")
         
         # Get device type
         device_type = self.device.type if hasattr(self.device, 'type') else str(self.device).split(':')[0]
@@ -345,7 +342,6 @@ class HierarchicalTrainer(ContinualTrainer):
         for task_id in self.model.specialist_tasks:
             if task_id in self.model.task_heads:
                 head = self.model.task_heads[task_id]
-                # Ensure head parameters require gradients
                 for param in head.parameters():
                     param.requires_grad_(True)
                 all_heads.append((task_id, head))
@@ -353,7 +349,6 @@ class HierarchicalTrainer(ContinualTrainer):
         for block in self.model.merged_blocks:
             for task_id in block.task_ids:
                 head = block.task_heads[task_id]
-                # Ensure head parameters require gradients
                 for param in head.parameters():
                     param.requires_grad_(True)
                 all_heads.append((task_id, head))
@@ -372,8 +367,8 @@ class HierarchicalTrainer(ContinualTrainer):
             print("Warning: No trainable parameters found in heads for OOD alignment")
             return
         
-        # Create optimizer and scaler
-        optimizer = torch.optim.Adam(head_params, lr=1e-4)
+        # Create optimizer with smaller learning rate
+        optimizer = torch.optim.Adam(head_params, lr=5e-5)  # Smaller LR
         scaler = GradScaler(device_type) if use_amp else None
         
         # Set model to training mode for heads, but keep backbone frozen
@@ -387,8 +382,8 @@ class HierarchicalTrainer(ContinualTrainer):
             total_epoch_loss = 0
             num_batches = 0
             
-            # Sample from memory buffer (contains data from all previous tasks)
-            memory_batch = self.memory_buffer.sample(batch_size=32)
+            # FIXED: Sample more balanced batches
+            memory_batch = self.memory_buffer.sample(batch_size=64)  # Larger batch
             if len(memory_batch['images']) == 0:
                 continue
             
@@ -396,78 +391,86 @@ class HierarchicalTrainer(ContinualTrainer):
             mem_labels = memory_batch['labels'].to(self.device)
             mem_task_ids = memory_batch.get('task_ids', [])
             
-            # Train each head separately
+            # FIXED: Balance the training data per head
             for head_task_id, head in all_heads:
+                # Get balanced samples for this head
+                own_indices = [i for i, tid in enumerate(mem_task_ids) if tid == head_task_id]
+                other_indices = [i for i, tid in enumerate(mem_task_ids) if tid != head_task_id]
+                
+                # FIXED: Ensure balanced training - equal own vs other samples
+                max_samples_per_type = min(16, len(own_indices), len(other_indices))
+                if max_samples_per_type < 4:  # Skip if too few samples
+                    continue
+                    
+                # Sample balanced data
+                own_indices = own_indices[:max_samples_per_type]
+                other_indices = other_indices[:max_samples_per_type]
+                selected_indices = own_indices + other_indices
+                
+                if len(selected_indices) == 0:
+                    continue
+                
+                batch_images = mem_images[selected_indices]
+                batch_labels = mem_labels[selected_indices]
+                batch_task_ids = [mem_task_ids[i] for i in selected_indices]
+                
                 optimizer.zero_grad()
                 
                 try:
                     if use_amp:
                         with autocast(device_type):
-                            # Get features with checkpointing - ensure gradients are enabled
                             with torch.enable_grad():
-                                features = self._get_features_checkpoint(mem_images)
-                                # Ensure features require gradients
+                                features = self._get_features_checkpoint(batch_images)
                                 if not features.requires_grad:
                                     features.requires_grad_(True)
                                 
-                                # Get logits from this specific head
                                 logits = head(features)
                                 
-                                # Create labels: own task = actual class, other tasks = unknown
+                                # Create balanced labels
                                 target_labels = []
-                                for mem_label, mem_task_id in zip(mem_labels, mem_task_ids):
-                                    if mem_task_id == head_task_id:
-                                        # This is data from the head's own task - use actual label
-                                        target_labels.append(mem_label.item())
+                                for batch_label, batch_task_id in zip(batch_labels, batch_task_ids):
+                                    if batch_task_id == head_task_id:
+                                        target_labels.append(batch_label.item())
                                     else:
-                                        # This is data from other tasks - classify as unknown
-                                        target_labels.append(logits.shape[1] - 1)  # Unknown class index
+                                        target_labels.append(logits.shape[1] - 1)  # Unknown class
                                 
                                 target_labels = torch.tensor(target_labels, device=self.device)
                                 
-                                # Calculate loss
-                                loss = F.cross_entropy(logits, target_labels)
+                                # FIXED: Add class weighting to balance own vs unknown
+                                class_weights = torch.ones(logits.shape[1], device=self.device)
+                                class_weights[-1] = 0.7  # Lower weight for unknown class
+                                loss = F.cross_entropy(logits, target_labels, weight=class_weights)
                         
-                        # Check if loss requires grad before backward
                         if loss.requires_grad:
-                            # Backward pass
                             scaler.scale(loss).backward()
                             scaler.step(optimizer)
                             scaler.update()
-                        else:
-                            print(f"Warning: Loss doesn't require grad for head {head_task_id}")
-                            
                     else:
-                        # Standard precision
                         with torch.enable_grad():
-                            features = self._get_features_checkpoint(mem_images)
-                            # Ensure features require gradients
+                            features = self._get_features_checkpoint(batch_images)
                             if not features.requires_grad:
                                 features.requires_grad_(True)
                             
                             logits = head(features)
                             
-                            # Create labels: own task = actual class, other tasks = unknown
+                            # Create balanced labels
                             target_labels = []
-                            for mem_label, mem_task_id in zip(mem_labels, mem_task_ids):
-                                if mem_task_id == head_task_id:
-                                    # This is data from the head's own task - use actual label
-                                    target_labels.append(mem_label.item())
+                            for batch_label, batch_task_id in zip(batch_labels, batch_task_ids):
+                                if batch_task_id == head_task_id:
+                                    target_labels.append(batch_label.item())
                                 else:
-                                    # This is data from other tasks - classify as unknown
-                                    target_labels.append(logits.shape[1] - 1)  # Unknown class index
+                                    target_labels.append(logits.shape[1] - 1)  # Unknown class
                             
                             target_labels = torch.tensor(target_labels, device=self.device)
                             
-                            # Calculate loss
-                            loss = F.cross_entropy(logits, target_labels)
+                            # FIXED: Add class weighting
+                            class_weights = torch.ones(logits.shape[1], device=self.device)
+                            class_weights[-1] = 0.7  # Lower weight for unknown class
+                            loss = F.cross_entropy(logits, target_labels, weight=class_weights)
                         
-                        # Check if loss requires grad before backward
                         if loss.requires_grad:
                             loss.backward()
                             optimizer.step()
-                        else:
-                            print(f"Warning: Loss doesn't require grad for head {head_task_id}")
                     
                     total_epoch_loss += loss.item()
                     num_batches += 1
@@ -479,9 +482,47 @@ class HierarchicalTrainer(ContinualTrainer):
             avg_epoch_loss = total_epoch_loss / max(1, num_batches)
             print(f"  Epoch {epoch+1}/{num_epochs}: Avg Loss = {avg_epoch_loss:.4f}")
             
-            # Optional: Print detailed breakdown
-            if epoch == 0:  # Print details for first epoch
-                self._print_ood_training_details(memory_batch, all_heads)
+            # FIXED: Validate task routing after each epoch
+            if epoch == num_epochs - 1:  # Last epoch
+                self._validate_task_routing(memory_batch, all_heads)
+
+    def _validate_task_routing(self, memory_batch: dict, all_heads: list):
+        """
+        FIXED: Validate that task routing is working correctly
+        """
+        print("\n=== Task Routing Validation ===")
+        
+        mem_images = memory_batch['images'].to(self.device)
+        mem_task_ids = memory_batch.get('task_ids', [])
+        
+        self.model.eval()
+        with torch.no_grad():
+            # Test task prediction
+            predicted_tasks, confidences = self.model.predict_task_id(mem_images)
+            
+            # Count correct predictions per task
+            task_accuracy = {}
+            for true_task, pred_task, conf in zip(mem_task_ids, predicted_tasks, confidences):
+                if true_task not in task_accuracy:
+                    task_accuracy[true_task] = {'correct': 0, 'total': 0}
+                
+                task_accuracy[true_task]['total'] += 1
+                if true_task == pred_task:
+                    task_accuracy[true_task]['correct'] += 1
+            
+            # Print routing accuracy
+            for task_id, stats in task_accuracy.items():
+                acc = 100 * stats['correct'] / stats['total']
+                print(f"  Task {task_id} routing accuracy: {acc:.1f}% ({stats['correct']}/{stats['total']})")
+            
+            # Overall routing accuracy
+            total_correct = sum(stats['correct'] for stats in task_accuracy.values())
+            total_samples = sum(stats['total'] for stats in task_accuracy.values())
+            overall_acc = 100 * total_correct / total_samples if total_samples > 0 else 0
+            print(f"  Overall routing accuracy: {overall_acc:.1f}%")
+            
+            if overall_acc < 70:
+                print("  ⚠️  WARNING: Poor task routing detected! This may cause evaluation issues.")
 
     def _get_features_checkpoint(self, images: torch.Tensor) -> torch.Tensor:
         """
@@ -622,17 +663,25 @@ class HierarchicalTrainer(ContinualTrainer):
 
     def evaluate_all_tasks(self, test_loaders: Dict[str, DataLoader]) -> Dict:
         """
-        Evaluate on all tasks using hierarchical prediction
+        More detailed evaluation with task routing diagnostics
         """
         self.model.eval()
         results = {
             'task_accuracy': {},
+            'routing_accuracy': {},
             'confusion_matrix': np.zeros((len(test_loaders), len(test_loaders)))
         }
         
+        print("\n=== Detailed Task Evaluation ===")
+        
         for true_task_id, test_loader in test_loaders.items():
-            correct = 0
+            correct_classifications = 0
+            correct_routing = 0
             total = 0
+            
+            task_predictions = []
+            class_predictions = []
+            true_labels = []
             
             with torch.no_grad():
                 for images, labels in test_loader:
@@ -643,27 +692,60 @@ class HierarchicalTrainer(ContinualTrainer):
                     predicted_tasks, confidences = self.model.predict_task_id(images)
                     
                     # Evaluate predictions
-                    for i, (pred_task, label) in enumerate(zip(predicted_tasks, labels)):
+                    for i, (pred_task, label, conf) in enumerate(zip(predicted_tasks, labels, confidences)):
+                        # Count routing accuracy
                         if pred_task == true_task_id:
-                            # Get class prediction
-                            logits = self.model(images[i:i+1], task_id=pred_task)
-                            pred_class = torch.argmax(logits[:, :-1], dim=1)
-                            if pred_class == label:
-                                correct += 1
+                            correct_routing += 1
+                            
+                            # Get class prediction only if routing is correct
+                            try:
+                                logits = self.model(images[i:i+1], task_id=pred_task)
+                                pred_class = torch.argmax(logits[:, :-1], dim=1)  # Exclude unknown class
+                                
+                                if pred_class == label:
+                                    correct_classifications += 1
+                                    
+                                class_predictions.append(pred_class.item())
+                            except:
+                                class_predictions.append(-1)  # Error
+                        else:
+                            class_predictions.append(-1)  # Wrong task routing
                         
+                        task_predictions.append(pred_task)
+                        true_labels.append(label.item())
                         total += 1
                         
                         # Update confusion matrix
-                        true_idx = int(true_task_id.split('_')[1])
-                        pred_idx = int(pred_task.split('_')[1])
-                        results['confusion_matrix'][true_idx, pred_idx] += 1
+                        try:
+                            true_idx = int(true_task_id.split('_')[1])
+                            pred_idx = int(pred_task.split('_')[1])
+                            results['confusion_matrix'][true_idx, pred_idx] += 1
+                        except:
+                            pass
             
-            accuracy = 100 * correct / total if total > 0 else 0
-            results['task_accuracy'][true_task_id] = accuracy
-            print(f"Task {true_task_id}: {accuracy:.2f}%")
+            # Calculate metrics
+            routing_accuracy = 100 * correct_routing / total if total > 0 else 0
+            classification_accuracy = 100 * correct_classifications / total if total > 0 else 0
+            
+            results['routing_accuracy'][true_task_id] = routing_accuracy
+            results['task_accuracy'][true_task_id] = classification_accuracy
+            
+            print(f"Task {true_task_id}:")
+            print(f"  Routing Accuracy: {routing_accuracy:.2f}% ({correct_routing}/{total})")
+            print(f"  Classification Accuracy: {classification_accuracy:.2f}% ({correct_classifications}/{total})")
+            print(f"  End-to-End Accuracy: {classification_accuracy:.2f}%")
+        
+        # Print summary
+        avg_routing = np.mean(list(results['routing_accuracy'].values()))
+        avg_classification = np.mean(list(results['task_accuracy'].values()))
+        
+        print(f"\n=== Summary ===")
+        print(f"Average Routing Accuracy: {avg_routing:.2f}%")
+        print(f"Average Classification Accuracy: {avg_classification:.2f}%")
         
         if hasattr(self.model, "visualize_hierarchy"):
             self.model.visualize_hierarchy()
 
-        results['avg_accuracy'] = np.mean(list(results['task_accuracy'].values()))
+        results['avg_accuracy'] = avg_classification
+        results['avg_routing_accuracy'] = avg_routing
         return results
