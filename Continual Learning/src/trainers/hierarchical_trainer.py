@@ -108,10 +108,10 @@ class HierarchicalTrainer:
                 f"Epoch {epoch+1}/{num_epochs + (warmup_epochs if task_idx == 0 else 0)}: "
                 f"Train Loss: {train_loss:.4f}, "
                 f"Train Acc: {train_metrics['accuracy']:.2f}%, "
-                f"Train Unknown F1: {train_metrics.get('unknown_f1', 0):.3f}, "
+                f"Train Unknown F1: {train_metrics.get('unknown_f1', -1):.3f}, "
                 f"Val Loss: {val_loss:.4f}, "
                 f"Val Acc: {val_metrics['accuracy']:.2f}%, "
-                f"Val Unknown F1: {val_metrics.get('unknown_f1', 0):.3f}"
+                f"Val Unknown F1: {val_metrics.get('unknown_f1', -1):.3f}"
             )
             
             # Early stopping
@@ -530,7 +530,7 @@ class HierarchicalTrainer:
             # Update metrics tracker if available
             if self.metrics is not None:
                 task_idx = int(task_id.split('_')[1])
-                self.metrics.update_accuracy(task_idx, task_idx, metrics['accuracy'])
+                self.metrics.update(task_idx, task_idx, metrics['accuracy'])
         
         return results
     
