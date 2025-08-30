@@ -51,8 +51,12 @@ class HierarchicalTrainer:
         
     def _initialize_metrics(self):
         """Initialize metrics tracking"""
-        from src.utils.metrics import ContinualMetrics
-        return ContinualMetrics(num_tasks=self.num_tasks)
+        try:
+            from src.utils.metrics import ContinualMetrics
+            return ContinualMetrics(num_tasks=self.num_tasks)
+        except ImportError:
+            # Fallback if metrics module is not available
+            return None
     
     def train_task(
         self,
@@ -101,7 +105,7 @@ class HierarchicalTrainer:
             
             # Log metrics
             self.logger.info(
-                f"Epoch {epoch+1}/{num_epochs}: "
+                f"Epoch {epoch+1}/{num_epochs + (warmup_epochs if task_idx == 0 else 0)}: "
                 f"Train Loss: {train_loss:.4f}, "
                 f"Train Acc: {train_metrics['accuracy']:.2f}%, "
                 f"Train Unknown F1: {train_metrics.get('unknown_f1', 0):.3f}, "
@@ -275,7 +279,7 @@ class HierarchicalTrainer:
         """
         
         loss_components = {}
-        total_loss = 0
+        total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
         
         # Classification loss (only for known samples)
         if has_unknown:
@@ -287,11 +291,11 @@ class HierarchicalTrainer:
                 
                 classification_loss = F.cross_entropy(known_logits, known_labels)
                 loss_components['classification'] = classification_loss.item()
-                total_loss += self.lambda_classification * classification_loss
+                total_loss = total_loss + self.lambda_classification * classification_loss
         else:
             classification_loss = F.cross_entropy(outputs['logits'], labels)
             loss_components['classification'] = classification_loss.item()
-            total_loss += self.lambda_classification * classification_loss
+            total_loss = total_loss + self.lambda_classification * classification_loss
         
         # Unknown detection loss
         if has_unknown and 'unknown_score' in outputs:
@@ -304,7 +308,7 @@ class HierarchicalTrainer:
             
             # Scale unknown loss based on task
             unknown_weight = self.lambda_task_unknown * (0.9 ** task_idx)
-            total_loss += unknown_weight * unknown_loss
+            total_loss = total_loss + unknown_weight * unknown_loss
         
         # Task-level unknown regularization
         if 'task_unknown_score' in outputs and task_idx > 0:
@@ -315,7 +319,7 @@ class HierarchicalTrainer:
                 unknown_flags
             )
             loss_components['task_unknown'] = task_unknown_loss.item()
-            total_loss += self.lambda_task_unknown * task_unknown_loss
+            total_loss = total_loss + self.lambda_task_unknown * task_unknown_loss
         
         # Block-level unknown regularization
         if 'block_unknown_score' in outputs:
@@ -326,16 +330,15 @@ class HierarchicalTrainer:
                 unknown_flags
             )
             loss_components['block_unknown'] = block_unknown_loss.item()
-            total_loss += self.lambda_block_unknown * block_unknown_loss
+            total_loss = total_loss + self.lambda_block_unknown * block_unknown_loss
         
         # Orthogonality regularization
         if 'orthogonal_loss' in outputs:
             loss_components['orthogonal'] = outputs['orthogonal_loss'].item()
-            total_loss += 0.1 * outputs['orthogonal_loss']
+            total_loss = total_loss + 0.1 * outputs['orthogonal_loss']
         
         return total_loss, loss_components
 
-    
     def _compute_task_unknown_loss(
         self,
         task_unknown_scores: torch.Tensor,
@@ -520,15 +523,20 @@ class HierarchicalTrainer:
         results = {}
         
         for task_id, loader in test_loaders.items():
+            # Fixed: Corrected the unpacking assignment
             _, metrics = self._validate(task_id, loader, int(task_id.split('_')[1]))
             results[task_id] = metrics['accuracy']
             
-            # Update metrics tracker
-            task_idx = int(task_id.split('_')[1])
-            self.metrics.update_accuracy(task_idx, task_idx, metrics['accuracy'])
+            # Update metrics tracker if available
+            if self.metrics is not None:
+                task_idx = int(task_id.split('_')[1])
+                self.metrics.update_accuracy(task_idx, task_idx, metrics['accuracy'])
         
         return results
     
     def get_metrics_summary(self) -> Dict:
         """Get comprehensive metrics summary"""
-        return self.metrics.get_summary()
+        if self.metrics is not None:
+            return self.metrics.get_summary()
+        else:
+            return {}
