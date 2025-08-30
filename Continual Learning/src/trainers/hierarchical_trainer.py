@@ -211,13 +211,13 @@ class HierarchicalTrainer(ContinualTrainer):
         if hasattr(self.model.backbone, 'cls_token'):
             cls_token = self.model.backbone.cls_token.expand(x.shape[0], -1, -1)
             x = torch.cat((cls_token, x), dim=1)
-            
+
         # For timm models, manually checkpoint each block
         if hasattr(self.model.backbone, 'pos_drop'):
             x = self.model.backbone.pos_drop(x + self.model.backbone.pos_embed)
         
         for block in self.model.backbone.blocks:
-            if self.training:
+            if self.model.training:
                 x = checkpoint(block, x)
             else:
                 x = block(x)
