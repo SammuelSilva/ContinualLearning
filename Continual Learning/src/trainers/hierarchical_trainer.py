@@ -164,11 +164,7 @@ class HierarchicalTrainer(ContinualTrainer):
             if use_amp:
                 with autocast(self.device.type):
                     # Forward pass with checkpointing
-                    logits = self._forward_with_checkpoint(images, task_id)
-                    
-                    # Debug: Print shapes to understand the issue
-                    print(f"Debug - Logits shape: {logits.shape}, Labels shape: {labels.shape}")
-                    
+                    logits = self._forward_with_checkpoint(images, task_id)                    
                     # Classification loss - Remove unknown class logit
                     class_logits = logits[:, :-1]  # Remove last column (unknown class)
                     loss = F.cross_entropy(class_logits, labels)
