@@ -162,7 +162,7 @@ class HierarchicalTrainer(ContinualTrainer):
             optimizer.zero_grad()
             
             if use_amp:
-                with autocast(self.device):
+                with autocast(self.device.type):
                     # Forward pass with checkpointing
                     logits = self._forward_with_checkpoint(images, task_id)
                     
@@ -277,7 +277,7 @@ class HierarchicalTrainer(ContinualTrainer):
                 labels = labels.to(self.device)
                 
                 if use_amp:
-                    with autocast(self.device):
+                    with autocast(self.device.type):
                         logits = self.model(images, task_id=task_id)
                         class_logits = logits[:, :-1]  # Remove unknown class
                         loss = F.cross_entropy(class_logits, labels)
@@ -306,7 +306,7 @@ class HierarchicalTrainer(ContinualTrainer):
         mem_task_ids = memory_batch.get('task_ids', [])
         
         # Forward with checkpointing
-        with autocast(self.device):
+        with autocast(self.device.type):
             mem_logits = self._forward_with_checkpoint(mem_images, task_id)
         
         # Create appropriate labels
@@ -369,7 +369,7 @@ class HierarchicalTrainer(ContinualTrainer):
             optimizer.zero_grad()
             
             if use_amp:
-                with autocast(self.device):
+                with autocast(self.device.type):
                     # Get features with checkpointing
                     features = checkpoint(self.model.backbone, images, use_reentrant=False)
                     
