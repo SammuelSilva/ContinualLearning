@@ -166,11 +166,19 @@ class HierarchicalTrainer:
             # Forward pass
             outputs = self.model(images, task_id=task_id)
             
-            # Ensure outputs['logits'] has correct shape
-            if 'logits' not in outputs:
-                raise ValueError("Model output must contain 'logits' key")
+            # Handle case where model returns tensor directly instead of dict
+            if isinstance(outputs, torch.Tensor):
+                # Model returned logits directly, wrap in expected format
+                logits = outputs
+                outputs = {'logits': logits}
+            elif isinstance(outputs, dict):
+                # Model returned dictionary as expected
+                if 'logits' not in outputs:
+                    raise ValueError("Model output dictionary must contain 'logits' key")
+                logits = outputs['logits']
+            else:
+                raise ValueError(f"Expected model output to be torch.Tensor or dict, got {type(outputs)}")
             
-            logits = outputs['logits']
             if logits.dim() != 2:
                 raise ValueError(f"Expected logits to be 2D tensor [batch_size, num_classes], got shape {logits.shape}")
             
@@ -405,8 +413,19 @@ class HierarchicalTrainer:
                 
                 outputs = self.model(images, task_id=task_id)
                 
-                # Ensure logits has correct shape
-                logits = outputs['logits']
+                # Handle case where model returns tensor directly instead of dict
+                if isinstance(outputs, torch.Tensor):
+                    # Model returned logits directly, wrap in expected format
+                    logits = outputs
+                    outputs = {'logits': logits}
+                elif isinstance(outputs, dict):
+                    # Model returned dictionary as expected
+                    if 'logits' not in outputs:
+                        raise ValueError("Model output dictionary must contain 'logits' key")
+                    logits = outputs['logits']
+                else:
+                    raise ValueError(f"Expected model output to be torch.Tensor or dict, got {type(outputs)}")
+                
                 if logits.dim() != 2:
                     raise ValueError(f"Expected logits to be 2D tensor, got shape {logits.shape}")
                 
@@ -471,7 +490,6 @@ class HierarchicalTrainer:
             })
         
         return total_loss / len(val_loader), metrics
-
     
     def _get_scheduler(self, optimizer, total_steps, warmup_steps):
         """Get learning rate scheduler with warmup"""
