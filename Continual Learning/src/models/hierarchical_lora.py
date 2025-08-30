@@ -341,10 +341,10 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                         best_task = task_id
                 
                 # If no head is confident enough, route to most recent
-                if best_score < (1.0 - unknown_threshold):
-                    print(f"Sample {i}: Low confidence (best: {best_score:.3f}, {best_task}), routing to fallback")
-                    best_task = all_tasks[-1]  # Most recent task
-                    best_score = 0.1  # Low confidence indicator
+                #if best_score < (1.0 - unknown_threshold):
+                #    print(f"Sample {i}: Low confidence (best: {best_score:.3f}, {best_task}), routing to fallback")
+                #    best_task = all_tasks[-1]  # Most recent task
+                #    best_score = 0.1  # Low confidence indicator
                 
                 predicted_tasks.append(best_task)
                 confidences.append(best_score)
