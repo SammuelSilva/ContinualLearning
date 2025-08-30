@@ -72,7 +72,7 @@ class HierarchicalTrainer:
         Train on a specific task with unknown sample handling.
         """
         
-        self.logger.info(f"Training {task_id} (Task {task_idx})")
+        print(f"Training {task_id} (Task {task_idx})")
         
         # Setup optimizer
         optimizer = AdamW(
@@ -104,7 +104,7 @@ class HierarchicalTrainer:
             val_loss, val_metrics = self._validate(task_id, val_loader, task_idx)
             
             # Log metrics
-            self.logger.info(
+            print(
                 f"Epoch {epoch+1}/{num_epochs + (warmup_epochs if task_idx == 0 else 0)}: "
                 f"Train Loss: {train_loss:.4f}, "
                 f"Train Acc: {train_metrics['accuracy']:.2f}%, "
@@ -123,7 +123,7 @@ class HierarchicalTrainer:
             else:
                 patience_counter += 1
                 if patience_counter >= patience and epoch > warmup_epochs:
-                    self.logger.info(f"Early stopping at epoch {epoch+1}")
+                    print(f"Early stopping at epoch {epoch+1}")
                     break
         
         return best_val_acc
@@ -516,7 +516,7 @@ class HierarchicalTrainer:
         
         path = f"{self.save_dir}/{task_id}_best.pth"
         torch.save(checkpoint, path)
-        self.logger.info(f"Saved checkpoint: {path}")
+        print(f"Saved checkpoint: {path}")
     
     def evaluate_all_tasks(self, test_loaders: Dict[str, torch.utils.data.DataLoader]) -> Dict:
         """Evaluate on all tasks"""

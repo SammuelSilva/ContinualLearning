@@ -327,15 +327,15 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             start_task = checkpoint_state['last_completed_task'] + 1
             task_accuracies = checkpoint_state.get('task_accuracies', {})
             unknown_metrics = checkpoint_state.get('unknown_metrics', {})
-            logger.info(f"Resuming from task {start_task}")
+            print(f"Resuming from task {start_task}")
     
     # Training loop
     for task_idx in range(start_task, args.num_tasks):
         task_id = f"task_{task_idx}"
         
-        logger.info(f"\n{'='*60}")
-        logger.info(f"TASK {task_idx + 1}/{args.num_tasks}: {task_id}")
-        logger.info(f"{'='*60}")
+        print(f"\n{'='*60}")
+        print(f"TASK {task_idx + 1}/{args.num_tasks}: {task_id}")
+        print(f"{'='*60}")
         
         # Get data loaders with unknown data if enabled
         train_loader, val_loader, test_loader = dataset.get_task_loaders(
@@ -349,17 +349,17 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         # Log dataset statistics
         if args.use_unknown_data:
             stats = dataset.get_statistics(task_idx)
-            logger.info(f"Task {task_idx} dataset composition:")
-            logger.info(f"  - Unknown ratio: {stats['unknown_ratio']:.2%}")
-            logger.info(f"  - Task samples: {stats.get('task_samples', 'N/A')}")
-            logger.info(f"  - Expected unknown samples: {stats.get('expected_unknown_samples', 'N/A')}")
+            print(f"Task {task_idx} dataset composition:")
+            print(f"  - Unknown ratio: {stats['unknown_ratio']:.2%}")
+            print(f"  - Task samples: {stats.get('task_samples', 'N/A')}")
+            print(f"  - Expected unknown samples: {stats.get('expected_unknown_samples', 'N/A')}")
         
         # Add task with correct number of classes
         num_classes = args.classes_per_task + 1 if args.use_unknown_data else args.classes_per_task
         model.add_task(task_id, num_classes)
         
         # Train on current task
-        logger.info(f"Training on {task_id}...")
+        print(f"Training on {task_id}...")
         best_acc = trainer.train_task(
             task_id=task_id,
             train_loader=train_loader,
@@ -370,17 +370,17 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             warmup_epochs=args.warmup_epochs if task_idx == 0 else 0
         )
         
-        logger.info(f"Best validation accuracy: {best_acc:.2f}%")
+        print(f"Best validation accuracy: {best_acc:.2f}%")
         
         # Store unknown metrics if available
         if args.use_unknown_data and hasattr(trainer, 'get_unknown_metrics'):
             unknown_metrics[task_idx] = trainer.get_unknown_metrics(task_id)
-            logger.info(f"Unknown detection metrics:")
+            print(f"Unknown detection metrics:")
             for metric_name, value in unknown_metrics[task_idx].items():
-                logger.info(f"  - {metric_name}: {value:.3f}")
+                print(f"  - {metric_name}: {value:.3f}")
         
         # Evaluate on all tasks
-        logger.info(f"\nEvaluating on all {task_idx + 1} tasks...")
+        print(f"\nEvaluating on all {task_idx + 1} tasks...")
         test_loaders = {}
         for i in range(task_idx + 1):
             _, _, test_loader_i = dataset.get_task_loaders(
@@ -414,17 +414,17 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         # Log statistics
         if args.use_hierarchical:
             stats = model.get_statistics()
-            logger.info(f"\nHierarchical Statistics:")
-            logger.info(f"  - Merged blocks: {stats['num_merged_blocks']}")
-            logger.info(f"  - Specialist tasks (unmerged): {stats['specialist_tasks']}")
-            logger.info(f"  - Total tasks: {stats['total_tasks']}")
-            logger.info(f"  - Merge attempts: {stats['merge_attempts']}")
-            logger.info(f"  - Successful merges: {stats['successful_merges']}")
+            print(f"\nHierarchical Statistics:")
+            print(f"  - Merged blocks: {stats['num_merged_blocks']}")
+            print(f"  - Specialist tasks (unmerged): {stats['specialist_tasks']}")
+            print(f"  - Total tasks: {stats['total_tasks']}")
+            print(f"  - Merge attempts: {stats['merge_attempts']}")
+            print(f"  - Successful merges: {stats['successful_merges']}")
 
     # Final evaluation
-    logger.info(f"\n{'='*60}")
-    logger.info("FINAL EVALUATION ON ALL TASKS")
-    logger.info(f"{'='*60}")
+    print(f"\n{'='*60}")
+    print("FINAL EVALUATION ON ALL TASKS")
+    print(f"{'='*60}")
     
     all_test_loaders = {}
     for i in range(args.num_tasks):
@@ -791,7 +791,7 @@ def main(args=None):
     
     # Setup logging
     logger = setup_logging(args.experiment_dir)
-    logger.info(f"Experiment: {args.experiment_name}")
+    print(f"Experiment: {args.experiment_name}")
     
     # Save configuration
     config_path = os.path.join(args.experiment_dir, 'config.json')
@@ -800,7 +800,7 @@ def main(args=None):
     
     # Setup device
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
-    logger.info(f"Using device: {device}")
+    print(f"Using device: {device}")
     
     # Run ablation study if specified
     if args.ablation_mode:
@@ -827,7 +827,7 @@ def main(args=None):
     # Evaluation only mode
     if args.eval_only:
         if args.eval_checkpoint:
-            logger.info(f"Loading checkpoint: {args.eval_checkpoint}")
+            print(f"Loading checkpoint: {args.eval_checkpoint}")
             # Load checkpoint and evaluate
             # ... implementation ...
         else:
@@ -837,7 +837,7 @@ def main(args=None):
     # Run training
     results = run_training(args, model, dataset, trainer, memory_buffer, logger)
     
-    logger.info("Experiment completed successfully!")
+    print("Experiment completed successfully!")
     
     return results
 
