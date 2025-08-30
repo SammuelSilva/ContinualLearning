@@ -492,3 +492,8 @@ class ContinualLoRAViT(nn.Module):
                 for param in self.task_heads[task_id].parameters():
                     param.requires_grad = False
 
+    def freeze_current_task_lora(self):
+        """Freeze only the current active task's LoRA"""
+        print(f"DEBUG: Freezing task: {self.current_task}")
+        for param in self.task_adapters[self.current_task].parameters():
+            param.requires_grad = False

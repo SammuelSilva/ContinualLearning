@@ -123,6 +123,7 @@ class HierarchicalTrainer(ContinualTrainer):
         
         # Mark task as trained
         self.model.mark_task_trained(task_id)
+        self.model.freeze_current_task_lora()
         
         # Update memory buffer
         self._update_memory_buffer(train_loader, task_id)
