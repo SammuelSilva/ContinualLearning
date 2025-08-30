@@ -412,7 +412,7 @@ class HierarchicalTrainer:
                     images = images.to(self.device)
                     labels = labels.to(self.device)
                     unknown_flags = torch.zeros_like(labels, dtype=torch.float)
-                    has_unknown = False
+                    has_unknown = True
                 
                 outputs = self.model(images, task_id=task_id)
                 
