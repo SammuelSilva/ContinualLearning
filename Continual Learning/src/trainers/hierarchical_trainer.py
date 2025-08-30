@@ -107,10 +107,12 @@ class HierarchicalTrainer(ContinualTrainer):
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 patience_counter = 0
-                self._save_checkpoint(task_id, epoch, val_acc)
             else:
                 patience_counter += 1
             
+            if epoch%2 == 0:
+                self._save_checkpoint(task_id, epoch, val_acc)
+
             print(f"Epoch {epoch+1}/{num_epochs} | "
                 f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
                 f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
