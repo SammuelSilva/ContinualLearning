@@ -1,5 +1,5 @@
 """
-Training script for Hierarchical LoRA-ViT with TRIM merging.
+Training script for Hierarchical LoRA-ViT with TRIM merging and Unknown Data Handling.
 Supports both standard and hierarchical modes with comprehensive experiments.
 """
 
@@ -19,7 +19,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.models.hierarchical_lora import HierarchicalLoRAViT
 from src.models.lora_vit import ContinualLoRAViT
-from src.data.cifar_dataset import ContinualCIFAR100
+from src.data.cifar_dataset import EnhancedContinualCIFAR100
 from src.data.memory_buffer import MemoryBuffer
 from src.trainers.hierarchical_trainer import HierarchicalTrainer
 from src.trainers.continual_trainer import ContinualTrainer
@@ -44,7 +44,7 @@ def setup_logging(experiment_dir: str):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Train Hierarchical LoRA-ViT with TRIM merging'
+        description='Train Hierarchical LoRA-ViT with TRIM merging and Unknown Data'
     )
     
     # Model arguments
@@ -80,7 +80,8 @@ def parse_args():
     parser.add_argument('--max_fp_increase', type=float, default=2.0,
                        help='Maximum false positive increase allowed')
     parser.add_argument('--ablation_samples', type=int, default=1000,
-                       help='Number of samples for ablation search')    
+                       help='Number of samples for ablation search')
+    
     # Data arguments
     parser.add_argument('--data_root', type=str, default='./data',
                        help='Root directory for datasets')
@@ -93,6 +94,18 @@ def parse_args():
                        help='Number of classes per task')
     parser.add_argument('--validation_split', type=float, default=0.1,
                        help='Validation split ratio')
+    
+    # Unknown data arguments
+    parser.add_argument('--use_unknown_data', action='store_true',
+                       help='Use SVHN as unknown/OOD data for training')
+    parser.add_argument('--unknown_ratio', type=float, default=0.3,
+                       help='Ratio of unknown samples to task samples (for task 0)')
+    parser.add_argument('--unknown_ratio_decay', type=float, default=0.85,
+                       help='Decay factor for unknown ratio across tasks')
+    parser.add_argument('--include_unknown_test', action='store_true',
+                       help='Include unknown samples in test evaluation')
+    parser.add_argument('--unknown_temperature', type=float, default=2.0,
+                       help='Temperature scaling for unknown detection')
     
     # Training arguments
     parser.add_argument('--batch_size', type=int, default=128,
@@ -113,6 +126,8 @@ def parse_args():
                        help='Weight for task-level unknown class loss')
     parser.add_argument('--lambda_block_unknown', type=float, default=0.3,
                        help='Weight for block-level unknown class loss')
+    parser.add_argument('--lambda_classification', type=float, default=1.0,
+                       help='Weight for classification loss')
     parser.add_argument('--lambda_intra_block', type=float, default=0.1,
                        help='Weight for intra-block regularization')
     
@@ -162,7 +177,7 @@ def parse_args():
     # Ablation study arguments
     parser.add_argument('--ablation_mode', type=str, default=None,
                        choices=['no_orthogonal', 'no_unknown', 'no_hierarchy', 
-                               'different_ranks', 'different_blocks'],
+                               'different_ranks', 'different_blocks', 'unknown_ratios'],
                        help='Run specific ablation study')
     
     return parser.parse_args()
@@ -204,10 +219,13 @@ def create_model(args) -> torch.nn.Module:
             use_pretrained=True,
             max_tasks_per_block=args.max_tasks_per_block,
             min_tasks_to_merge=args.min_tasks_to_merge,
-            merge_config=merge_config
+            merge_config=merge_config,
+            include_unknown_head=args.use_unknown_data  # Enable unknown head if using unknown data
         )
 
         print(f"  - Tasks per block: {args.max_tasks_per_block}")
+        if args.use_unknown_data:
+            print(f"  - Unknown detection: ENABLED")
     else:
         print("Error: Hierarchical LoRA is not enabled")
         return None
@@ -229,11 +247,15 @@ def create_dataset(args):
     """Create dataset based on arguments"""
     
     if args.dataset == 'cifar100':
-        dataset = ContinualCIFAR100(
+        # Always use Enhanced dataset which can handle both cases
+        dataset = EnhancedContinualCIFAR100(
             data_root=args.data_root,
             num_tasks=args.num_tasks,
             classes_per_task=args.classes_per_task,
             validation_split=args.validation_split,
+            unknown_ratio=args.unknown_ratio,
+            unknown_ratio_decay=args.unknown_ratio_decay,
+            use_unknown_data=args.use_unknown_data,
             seed=args.seed
         )
     else:
@@ -243,25 +265,33 @@ def create_dataset(args):
     print(f"  - Num tasks: {args.num_tasks}")
     print(f"  - Classes per task: {args.classes_per_task}")
     
+    if args.use_unknown_data:
+        print(f"  - Unknown data: SVHN")
+        print(f"  - Unknown ratio (task 0): {args.unknown_ratio:.1%}")
+        print(f"  - Unknown decay: {args.unknown_ratio_decay}")
+    
     return dataset
 
 
 def create_trainer(model, memory_buffer, args):
-    """Create appropriate trainer based on model type"""
+    """Create appropriate trainer based on model type and configuration"""
     
     if args.use_hierarchical:
-        trainer = HierarchicalTrainer(
-            model=model,
-            memory_buffer=memory_buffer,
-            device=torch.device(args.device),
-            learning_rate=args.learning_rate,
-            weight_decay=args.weight_decay,
-            lambda_task_unknown=args.lambda_task_unknown,
-            lambda_block_unknown=args.lambda_block_unknown,
-            save_dir=os.path.join(args.experiment_dir, 'checkpoints'),
-            num_tasks=args.num_tasks
-        )
-        trainer.lambda_intra_block = args.lambda_intra_block
+        # Use enhanced trainer when unknown data is enabled
+        if args.use_unknown_data:
+            trainer = HierarchicalTrainer(
+                model=model,
+                memory_buffer=memory_buffer,
+                device=torch.device(args.device),
+                learning_rate=args.learning_rate,
+                weight_decay=args.weight_decay,
+                lambda_task_unknown=args.lambda_task_unknown,
+                lambda_block_unknown=args.lambda_block_unknown,
+                lambda_classification=args.lambda_classification,
+                unknown_temperature=args.unknown_temperature,
+                save_dir=os.path.join(args.experiment_dir, 'checkpoints'),
+                num_tasks=args.num_tasks
+            )
     else:
         trainer = ContinualTrainer(
             model=model,
@@ -278,7 +308,7 @@ def create_trainer(model, memory_buffer, args):
 
 
 def run_training(args, model, dataset, trainer, memory_buffer, logger):
-    """Main training loop"""
+    """Main training loop with unknown data handling"""
     
     # Visualization setup
     visualizer = None
@@ -288,6 +318,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
     # Track metrics
     all_results = {}
     task_accuracies = {}
+    unknown_metrics = {}
     
     # Resume state
     start_task = 0
@@ -296,6 +327,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         if checkpoint_state:
             start_task = checkpoint_state['last_completed_task'] + 1
             task_accuracies = checkpoint_state.get('task_accuracies', {})
+            unknown_metrics = checkpoint_state.get('unknown_metrics', {})
             logger.info(f"Resuming from task {start_task}")
     
     # Training loop
@@ -305,16 +337,27 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         logger.info(f"\n{'='*60}")
         logger.info(f"TASK {task_idx + 1}/{args.num_tasks}: {task_id}")
         logger.info(f"{'='*60}")
-                
-        # Get data loaders
+        
+        # Get data loaders with unknown data if enabled
         train_loader, val_loader, test_loader = dataset.get_task_loaders(
             task_idx,
             batch_size=args.batch_size,
-            num_workers=args.num_workers
+            num_workers=args.num_workers,
+            include_unknown_train=args.use_unknown_data,
+            include_unknown_test=args.include_unknown_test
         )
-
-        # Add task with validation data
-        model.add_task(task_id, args.classes_per_task)
+        
+        # Log dataset statistics
+        if args.use_unknown_data:
+            stats = dataset.get_statistics(task_idx)
+            logger.info(f"Task {task_idx} dataset composition:")
+            logger.info(f"  - Unknown ratio: {stats['unknown_ratio']:.2%}")
+            logger.info(f"  - Task samples: {stats.get('task_samples', 'N/A')}")
+            logger.info(f"  - Expected unknown samples: {stats.get('expected_unknown_samples', 'N/A')}")
+        
+        # Add task with correct number of classes
+        num_classes = args.classes_per_task + 1 if args.use_unknown_data else args.classes_per_task
+        model.add_task(task_id, num_classes)
         
         # Train on current task
         logger.info(f"Training on {task_id}...")
@@ -324,10 +367,18 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             val_loader=val_loader,
             num_epochs=args.num_epochs,
             patience=5,
-            task_idx=task_idx
+            task_idx=task_idx,
+            warmup_epochs=args.warmup_epochs if task_idx == 0 else 0
         )
         
         logger.info(f"Best validation accuracy: {best_acc:.2f}%")
+        
+        # Store unknown metrics if available
+        if args.use_unknown_data and hasattr(trainer, 'get_unknown_metrics'):
+            unknown_metrics[task_idx] = trainer.get_unknown_metrics(task_id)
+            logger.info(f"Unknown detection metrics:")
+            for metric_name, value in unknown_metrics[task_idx].items():
+                logger.info(f"  - {metric_name}: {value:.3f}")
         
         # Evaluate on all tasks
         logger.info(f"\nEvaluating on all {task_idx + 1} tasks...")
@@ -336,13 +387,13 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             _, _, test_loader_i = dataset.get_task_loaders(
                 i,
                 batch_size=args.batch_size,
-                num_workers=args.num_workers
+                num_workers=args.num_workers,
+                include_unknown_train=False,
+                include_unknown_test=args.include_unknown_test
             )
             test_loaders[f"task_{i}"] = test_loader_i
         
-
         current_results = trainer.evaluate_all_tasks(test_loaders)
-        
         task_accuracies[task_idx] = current_results
         
         # Save checkpoint state
@@ -350,14 +401,15 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             args.experiment_dir,
             task_idx,
             task_accuracies,
-            trainer.metrics
+            trainer.metrics,
+            unknown_metrics
         )
         
         # Visualizations
         if visualizer and task_idx % args.plot_freq == 0:
             create_visualizations(
                 visualizer, model, trainer, 
-                task_idx, args
+                task_idx, args, unknown_metrics
             )
         
         # Log statistics
@@ -380,12 +432,14 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         _, _, test_loader = dataset.get_task_loaders(
             i,
             batch_size=args.batch_size,
-            num_workers=args.num_workers
+            num_workers=args.num_workers,
+            include_unknown_train=False,
+            include_unknown_test=args.include_unknown_test
         )
         all_test_loaders[f"task_{i}"] = test_loader
     
     if args.use_hierarchical:
-        final_results = trainer.evaluate_hierarchical(all_test_loaders)
+        final_results = trainer.evaluate_hierarchical(all_test_loaders) if hasattr(trainer, 'evaluate_hierarchical') else trainer.evaluate_all_tasks(all_test_loaders)
     else:
         final_results = trainer.evaluate_all_tasks(all_test_loaders)
     
@@ -398,6 +452,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         'task_accuracies': task_accuracies,
         'final_results': final_results,
         'metrics': final_metrics,
+        'unknown_metrics': unknown_metrics if args.use_unknown_data else None,
         'model_stats': model.get_statistics() if args.use_hierarchical else None
     }
     
@@ -406,19 +461,19 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         json.dump(results, f, indent=4, cls=NumpyJSONEncoder)
     
     # Print summary
-    print_summary(final_metrics, final_results, args)
+    print_summary(final_metrics, final_results, args, unknown_metrics)
     
     # Final visualizations
     if visualizer:
         create_final_visualizations(
             visualizer, model, trainer,
-            args
+            args, unknown_metrics
         )
     
     return results
 
 
-def create_visualizations(visualizer, model, trainer, task_idx, args):
+def create_visualizations(visualizer, model, trainer, task_idx, args, unknown_metrics=None):
     """Create visualizations during training"""
     
     save_dir = os.path.join(args.experiment_dir, 'visualizations', f'task_{task_idx}')
@@ -447,11 +502,18 @@ def create_visualizations(visualizer, model, trainer, task_idx, args):
                 save_path=os.path.join(save_dir, 'orthogonality.png')
             )
     
+    # Plot unknown detection metrics if available
+    if args.use_unknown_data and unknown_metrics:
+        visualizer.plot_unknown_metrics(
+            unknown_metrics,
+            save_path=os.path.join(save_dir, 'unknown_detection.png')
+        )
+    
     # Plot metrics evolution
     trainer.plot_metrics(save_dir)
 
 
-def create_final_visualizations(visualizer, model, trainer, args):
+def create_final_visualizations(visualizer, model, trainer, args, unknown_metrics=None):
     """Create final visualizations after training"""
     
     save_dir = os.path.join(args.experiment_dir, 'visualizations', 'final')
@@ -463,6 +525,7 @@ def create_final_visualizations(visualizer, model, trainer, args):
         visualizer.create_training_dashboard(
             metrics_history=trainer.metrics.__dict__,
             hierarchy_stats=stats,
+            unknown_metrics=unknown_metrics,
             save_path=os.path.join(save_dir, 'dashboard.html')
         )
     
@@ -482,10 +545,17 @@ def create_final_visualizations(visualizer, model, trainer, args):
     trainer.metrics.plot_metrics_evolution(
         save_path=os.path.join(save_dir, 'metrics_evolution.png')
     )
+    
+    # Plot final unknown metrics
+    if args.use_unknown_data and unknown_metrics:
+        visualizer.plot_unknown_metrics_summary(
+            unknown_metrics,
+            save_path=os.path.join(save_dir, 'unknown_summary.png')
+        )
 
 
-def print_summary(metrics, final_results, args):
-    """Print training summary"""
+def print_summary(metrics, final_results, args, unknown_metrics=None):
+    """Print training summary with unknown metrics"""
     
     print(f"\n{'='*60}")
     print("EXPERIMENT SUMMARY")
@@ -494,12 +564,20 @@ def print_summary(metrics, final_results, args):
     if args.use_hierarchical:
         print(f"Architecture: Hierarchical LoRA-ViT")
         print(f"  - Tasks per block: {args.max_tasks_per_block}")
+        if args.use_unknown_data:
+            print(f"  - Unknown detection: ENABLED")
     else:
         print(f"Architecture: Standard Continual LoRA-ViT")
     
     print(f"\nLoRA Configuration: {args.lora_config}")
     print(f"  - Rank: {args.lora_rank}")
     print(f"  - Alpha: {args.lora_alpha}")
+    
+    if args.use_unknown_data:
+        print(f"\nUnknown Data Configuration:")
+        print(f"  - Dataset: SVHN")
+        print(f"  - Initial ratio: {args.unknown_ratio:.1%}")
+        print(f"  - Decay factor: {args.unknown_ratio_decay}")
     
     print(f"\n{'='*60}")
     print("METRICS")
@@ -510,6 +588,20 @@ def print_summary(metrics, final_results, args):
     print(f"Forward Transfer:     {metrics['forward_transfer']:.2f}%")
     print(f"Plasticity:          {metrics['plasticity']:.2f}%")
     print(f"Stability:           {metrics['stability']:.2f}")
+    
+    # Print unknown detection metrics if available
+    if args.use_unknown_data and unknown_metrics:
+        print(f"\n{'='*60}")
+        print("UNKNOWN DETECTION METRICS")
+        print(f"{'='*60}")
+        
+        avg_f1 = np.mean([m.get('unknown_f1', 0) for m in unknown_metrics.values()])
+        avg_precision = np.mean([m.get('unknown_precision', 0) for m in unknown_metrics.values()])
+        avg_recall = np.mean([m.get('unknown_recall', 0) for m in unknown_metrics.values()])
+        
+        print(f"Average F1 Score:     {avg_f1:.3f}")
+        print(f"Average Precision:    {avg_precision:.3f}")
+        print(f"Average Recall:       {avg_recall:.3f}")
     
     print(f"\n{'='*60}")
     print("PER-TASK FINAL ACCURACIES")
@@ -528,13 +620,14 @@ def print_summary(metrics, final_results, args):
     print(f"{'='*60}")
 
 
-def save_checkpoint_state(experiment_dir, task_idx, task_accuracies, metrics):
+def save_checkpoint_state(experiment_dir, task_idx, task_accuracies, metrics, unknown_metrics=None):
     """Save training state for resuming"""
     
     state = {
         'last_completed_task': task_idx,
         'task_accuracies': task_accuracies,
         'metrics': metrics.__dict__ if hasattr(metrics, '__dict__') else {},
+        'unknown_metrics': unknown_metrics,
         'timestamp': datetime.now().isoformat()
     }
     
@@ -567,6 +660,7 @@ def run_ablation_study(args):
         
     elif args.ablation_mode == 'no_unknown':
         # Test without unknown class mechanism
+        args.use_unknown_data = False
         args.lambda_task_unknown = 0.0
         args.lambda_block_unknown = 0.0
         print("Testing without unknown class mechanism...")
@@ -575,6 +669,27 @@ def run_ablation_study(args):
         # Test without hierarchical structure
         args.use_hierarchical = False
         print("Testing without hierarchical structure...")
+        
+    elif args.ablation_mode == 'unknown_ratios':
+        # Test different unknown ratios
+        ratios = [0.1, 0.2, 0.3, 0.4]
+        results = {}
+        
+        for ratio in ratios:
+            print(f"\nTesting with unknown_ratio={ratio}...")
+            args.unknown_ratio = ratio
+            args.use_unknown_data = True
+            args.experiment_name = f"ablation_unknown_{int(ratio*100)}"
+            main(args)
+            
+            # Load results
+            results_path = os.path.join(args.experiment_dir, 'final_results.json')
+            with open(results_path, 'r') as f:
+                results[f"ratio_{ratio}"] = json.load(f)
+        
+        # Compare results
+        compare_ablation_results(results, args.save_dir)
+        return
         
     elif args.ablation_mode == 'different_ranks':
         # Test different LoRA ranks
@@ -666,7 +781,8 @@ def main(args=None):
     if args.experiment_name is None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         if args.use_hierarchical:
-            args.experiment_name = f"hierarchical_{args.lora_config}_{timestamp}"
+            unknown_suffix = "_unknown" if args.use_unknown_data else ""
+            args.experiment_name = f"hierarchical_{args.lora_config}{unknown_suffix}_{timestamp}"
         else:
             args.experiment_name = f"standard_{args.lora_config}_{timestamp}"
     
