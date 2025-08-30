@@ -296,101 +296,58 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
         
         return features
     
-    def predict_task_id(self, x: torch.Tensor, unknown_threshold: float = 0.3) -> Tuple[List[str], List[float]]:
+    def predict_task_id(self, x: torch.Tensor, unknown_threshold: float = 0.5) -> Tuple[List[str], List[float]]:
         """
-        FIXED: Use unknown class probability as the PRIMARY routing mechanism
-        
-        Logic:
-        1. For each head, check if it classifies the input as "unknown"
-        2. The head with the LOWEST "unknown" probability gets the sample
-        3. If ALL heads say "unknown" above threshold, route to most recent task
+        More conservative version - requires high confidence to accept a sample
         """
         self.eval()
         batch_size = x.size(0)
         
         with torch.no_grad():
-            # Get features once
             features = self._get_features(x)
             
-            # Test all heads and get their "unknown" probabilities
-            head_unknown_probs = {}
-            head_confidence_scores = {}
+            head_scores = {}
             
-            # Test specialist tasks
+            # Get scores from all heads
             for task_id in self.specialist_tasks:
                 if task_id in self.task_heads:
-                    try:
-                        logits = self.task_heads[task_id](features)
-                        probs = F.softmax(logits, dim=1)
-                        
-                        # Get "unknown" class probability (last class)
-                        unknown_prob = probs[:, -1]  # Shape: [batch_size]
-                        
-                        # Get confidence in actual classes (excluding unknown)
-                        class_probs = probs[:, :-1]  # Exclude unknown class
-                        max_class_prob = torch.max(class_probs, dim=1)[0]  # Max probability among real classes
-                        
-                        head_unknown_probs[task_id] = unknown_prob
-                        head_confidence_scores[task_id] = max_class_prob
-                        
-                    except Exception as e:
-                        print(f"Error with specialist task {task_id}: {e}")
-                        continue
+                    logits = self.task_heads[task_id](features)
+                    probs = F.softmax(logits, dim=1)
+                    
+                    # Score = confidence in accepting the sample
+                    # = max class probability * (1 - unknown probability)
+                    class_probs = probs[:, :-1]
+                    unknown_prob = probs[:, -1]
+                    max_class_prob = torch.max(class_probs, dim=1)[0]
+                    
+                    # Combined score: high class confidence AND low unknown probability
+                    acceptance_score = max_class_prob * (1.0 - unknown_prob)
+                    head_scores[task_id] = acceptance_score
             
-            # Test merged blocks
-            for block in self.merged_blocks:
-                for task_id in block.task_ids:
-                    try:
-                        logits = block.task_heads[task_id](features)
-                        probs = F.softmax(logits, dim=1)
-                        
-                        unknown_prob = probs[:, -1]
-                        class_probs = probs[:, :-1]
-                        max_class_prob = torch.max(class_probs, dim=1)[0]
-                        
-                        head_unknown_probs[task_id] = unknown_prob
-                        head_confidence_scores[task_id] = max_class_prob
-                        
-                    except Exception as e:
-                        print(f"Error with merged task {task_id}: {e}")
-                        continue
-            
-            # Route each sample based on unknown probabilities
+            # Route based on highest acceptance score
             predicted_tasks = []
             confidences = []
             
-            # Get task list (sorted by creation order - most recent last)
-            all_tasks = list(head_unknown_probs.keys())
+            all_tasks = list(head_scores.keys())
             
             for i in range(batch_size):
                 best_task = None
-                best_score = float('inf')  # We want the LOWEST unknown probability
-                best_confidence = 0.0
+                best_score = -1.0
                 
-                # Find the head that is MOST confident this sample belongs to it
-                # (i.e., has the LOWEST unknown probability)
-                for task_id in all_tasks:
-                    unknown_prob = head_unknown_probs[task_id][i].item()
-                    class_confidence = head_confidence_scores[task_id][i].item()
-                    
-                    # The "score" is the unknown probability (lower is better)
-                    if unknown_prob < best_score:
-                        best_score = unknown_prob
+                for task_id, scores in head_scores.items():
+                    score = scores[i].item()
+                    if score > best_score:
+                        best_score = score
                         best_task = task_id
-                        best_confidence = class_confidence
                 
-                # If ALL heads think this is "unknown" (above threshold), 
-                # route to the most recent task as fallback
-                if best_score > unknown_threshold:
-                    print(f"Sample {i}: All heads uncertain (best unknown prob: {best_score:.3f}), routing to most recent task")
+                # If no head is confident enough, route to most recent
+                if best_score < (1.0 - unknown_threshold):
+                    print(f"Sample {i}: Low confidence (best: {best_score:.3f}, {best_task}), routing to fallback")
                     best_task = all_tasks[-1]  # Most recent task
-                    best_confidence = 1.0 - best_score  # Convert unknown prob to confidence
-                else:
-                    # Convert unknown probability to confidence measure
-                    best_confidence = 1.0 - best_score
+                    best_score = 0.1  # Low confidence indicator
                 
                 predicted_tasks.append(best_task)
-                confidences.append(best_confidence)
+                confidences.append(best_score)
         
         return predicted_tasks, confidences
 
