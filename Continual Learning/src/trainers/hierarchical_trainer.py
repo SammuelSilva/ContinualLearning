@@ -162,7 +162,7 @@ class HierarchicalTrainer(ContinualTrainer):
             optimizer.zero_grad()
             
             if use_amp:
-                with autocast():
+                with autocast(self.device):
                     # Forward pass with checkpointing
                     logits = self._forward_with_checkpoint(images, task_id)
                     
