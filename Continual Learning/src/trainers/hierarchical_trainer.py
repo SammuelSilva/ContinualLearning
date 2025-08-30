@@ -340,26 +340,48 @@ class HierarchicalTrainer(ContinualTrainer):
         # Get device type
         device_type = self.device.type if hasattr(self.device, 'type') else str(self.device).split(':')[0]
         
-        # Collect all heads
+        # Collect all heads and ensure they require gradients
         all_heads = []
         for task_id in self.model.specialist_tasks:
             if task_id in self.model.task_heads:
-                all_heads.append((task_id, self.model.task_heads[task_id]))
+                head = self.model.task_heads[task_id]
+                # Ensure head parameters require gradients
+                for param in head.parameters():
+                    param.requires_grad_(True)
+                all_heads.append((task_id, head))
         
         for block in self.model.merged_blocks:
             for task_id in block.task_ids:
-                all_heads.append((task_id, block.task_heads[task_id]))
+                head = block.task_heads[task_id]
+                # Ensure head parameters require gradients
+                for param in head.parameters():
+                    param.requires_grad_(True)
+                all_heads.append((task_id, head))
         
         if not all_heads:
             return
         
-        # Optimizer for heads
+        # Collect trainable parameters from heads only
         head_params = []
         for _, head in all_heads:
-            head_params.extend(head.parameters())
+            for param in head.parameters():
+                if param.requires_grad:
+                    head_params.append(param)
         
+        if not head_params:
+            print("Warning: No trainable parameters found in heads for OOD alignment")
+            return
+        
+        # Create optimizer and scaler
         optimizer = torch.optim.Adam(head_params, lr=1e-4)
         scaler = GradScaler(device_type) if use_amp else None
+        
+        # Set model to training mode for heads, but keep backbone frozen
+        self.model.train()
+        
+        # Ensure backbone is frozen during OOD alignment
+        for param in self.model.backbone.parameters():
+            param.requires_grad_(False)
         
         for epoch in range(num_epochs):
             total_epoch_loss = 0
@@ -378,57 +400,81 @@ class HierarchicalTrainer(ContinualTrainer):
             for head_task_id, head in all_heads:
                 optimizer.zero_grad()
                 
-                if use_amp:
-                    with autocast(device_type):
-                        # Get features with checkpointing
-                        features = self._get_features_checkpoint(mem_images)
+                try:
+                    if use_amp:
+                        with autocast(device_type):
+                            # Get features with checkpointing - ensure gradients are enabled
+                            with torch.enable_grad():
+                                features = self._get_features_checkpoint(mem_images)
+                                # Ensure features require gradients
+                                if not features.requires_grad:
+                                    features.requires_grad_(True)
+                                
+                                # Get logits from this specific head
+                                logits = head(features)
+                                
+                                # Create labels: own task = actual class, other tasks = unknown
+                                target_labels = []
+                                for mem_label, mem_task_id in zip(mem_labels, mem_task_ids):
+                                    if mem_task_id == head_task_id:
+                                        # This is data from the head's own task - use actual label
+                                        target_labels.append(mem_label.item())
+                                    else:
+                                        # This is data from other tasks - classify as unknown
+                                        target_labels.append(logits.shape[1] - 1)  # Unknown class index
+                                
+                                target_labels = torch.tensor(target_labels, device=self.device)
+                                
+                                # Calculate loss
+                                loss = F.cross_entropy(logits, target_labels)
                         
-                        # Get logits from this specific head
-                        logits = head(features)
-                        
-                        # Create labels: own task = actual class, other tasks = unknown
-                        target_labels = []
-                        for mem_label, mem_task_id in zip(mem_labels, mem_task_ids):
-                            if mem_task_id == head_task_id:
-                                # This is data from the head's own task - use actual label
-                                target_labels.append(mem_label.item())
-                            else:
-                                # This is data from other tasks - classify as unknown
-                                target_labels.append(logits.shape[1] - 1)  # Unknown class index
-                        
-                        target_labels = torch.tensor(target_labels, device=self.device)
-                        
-                        # Calculate loss
-                        loss = F.cross_entropy(logits, target_labels)
-                    
-                    # Backward pass
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    # Standard precision
-                    features = self._get_features_checkpoint(mem_images)
-                    logits = head(features)
-                    
-                    # Create labels: own task = actual class, other tasks = unknown
-                    target_labels = []
-                    for mem_label, mem_task_id in zip(mem_labels, mem_task_ids):
-                        if mem_task_id == head_task_id:
-                            # This is data from the head's own task - use actual label
-                            target_labels.append(mem_label.item())
+                        # Check if loss requires grad before backward
+                        if loss.requires_grad:
+                            # Backward pass
+                            scaler.scale(loss).backward()
+                            scaler.step(optimizer)
+                            scaler.update()
                         else:
-                            # This is data from other tasks - classify as unknown
-                            target_labels.append(logits.shape[1] - 1)  # Unknown class index
+                            print(f"Warning: Loss doesn't require grad for head {head_task_id}")
+                            
+                    else:
+                        # Standard precision
+                        with torch.enable_grad():
+                            features = self._get_features_checkpoint(mem_images)
+                            # Ensure features require gradients
+                            if not features.requires_grad:
+                                features.requires_grad_(True)
+                            
+                            logits = head(features)
+                            
+                            # Create labels: own task = actual class, other tasks = unknown
+                            target_labels = []
+                            for mem_label, mem_task_id in zip(mem_labels, mem_task_ids):
+                                if mem_task_id == head_task_id:
+                                    # This is data from the head's own task - use actual label
+                                    target_labels.append(mem_label.item())
+                                else:
+                                    # This is data from other tasks - classify as unknown
+                                    target_labels.append(logits.shape[1] - 1)  # Unknown class index
+                            
+                            target_labels = torch.tensor(target_labels, device=self.device)
+                            
+                            # Calculate loss
+                            loss = F.cross_entropy(logits, target_labels)
+                        
+                        # Check if loss requires grad before backward
+                        if loss.requires_grad:
+                            loss.backward()
+                            optimizer.step()
+                        else:
+                            print(f"Warning: Loss doesn't require grad for head {head_task_id}")
                     
-                    target_labels = torch.tensor(target_labels, device=self.device)
+                    total_epoch_loss += loss.item()
+                    num_batches += 1
                     
-                    # Calculate loss
-                    loss = F.cross_entropy(logits, target_labels)
-                    loss.backward()
-                    optimizer.step()
-                
-                total_epoch_loss += loss.item()
-                num_batches += 1
+                except RuntimeError as e:
+                    print(f"Error training head {head_task_id}: {e}")
+                    continue
             
             avg_epoch_loss = total_epoch_loss / max(1, num_batches)
             print(f"  Epoch {epoch+1}/{num_epochs}: Avg Loss = {avg_epoch_loss:.4f}")
@@ -440,41 +486,59 @@ class HierarchicalTrainer(ContinualTrainer):
     def _get_features_checkpoint(self, images: torch.Tensor) -> torch.Tensor:
         """
         Extract features from backbone using checkpointing
+        Modified to ensure gradient flow even with frozen backbone
         """
-        x = self.model.backbone.patch_embed(images)
+        # Temporarily enable gradients for feature extraction
+        original_requires_grad = {}
         
-        # Add class token if the model expects it
-        if hasattr(self.model.backbone, 'cls_token'):
-            cls_token = self.model.backbone.cls_token.expand(x.shape[0], -1, -1)
-            x = torch.cat((cls_token, x), dim=1)
+        # Store original gradient requirements and temporarily enable them
+        for name, param in self.model.backbone.named_parameters():
+            original_requires_grad[name] = param.requires_grad
+            param.requires_grad_(True)
+        
+        try:
+            x = self.model.backbone.patch_embed(images)
             
-        # Position embeddings
-        if hasattr(self.model.backbone, 'pos_drop'):
-            x = self.model.backbone.pos_drop(x + self.model.backbone.pos_embed)
-        
-        # Transformer blocks
-        for block in self.model.backbone.blocks:
-            if self.model.training:
-                x = checkpoint(block, x, use_reentrant=False)
+            # Add class token if the model expects it
+            if hasattr(self.model.backbone, 'cls_token'):
+                cls_token = self.model.backbone.cls_token.expand(x.shape[0], -1, -1)
+                x = torch.cat((cls_token, x), dim=1)
+                
+            # Position embeddings
+            if hasattr(self.model.backbone, 'pos_drop'):
+                x = self.model.backbone.pos_drop(x + self.model.backbone.pos_embed)
+            
+            # Transformer blocks with gradient checkpointing
+            for block in self.model.backbone.blocks:
+                if self.model.training:
+                    x = checkpoint(block, x, use_reentrant=False)
+                else:
+                    x = block(x)
+            
+            x = self.model.backbone.norm(x)
+            
+            # Extract class token (first token) for classification
+            if hasattr(self.model.backbone, 'cls_token'):
+                cls_output = x[:, 0]  # Shape: [batch_size, embed_dim]
             else:
-                x = block(x)
-        
-        x = self.model.backbone.norm(x)
-        
-        # Extract class token (first token) for classification
-        if hasattr(self.model.backbone, 'cls_token'):
-            cls_output = x[:, 0]  # Shape: [batch_size, embed_dim]
-        else:
-            cls_output = x.mean(dim=1)  # Global average pooling
-        
-        # Apply backbone head if it exists
-        if hasattr(self.model.backbone, 'head') and self.model.backbone.head is not None:
-            features = self.model.backbone.head(cls_output)
-        else:
-            features = cls_output
-        
-        return features
-
+                cls_output = x.mean(dim=1)  # Global average pooling
+            
+            # Apply backbone head if it exists
+            if hasattr(self.model.backbone, 'head') and self.model.backbone.head is not None:
+                features = self.model.backbone.head(cls_output)
+            else:
+                features = cls_output
+            
+            # Detach from backbone gradients and create new tensor that requires grad
+            features = features.detach().requires_grad_(True)
+            
+            return features
+            
+        finally:
+            # Restore original gradient requirements
+            for name, param in self.model.backbone.named_parameters():
+                param.requires_grad_(original_requires_grad[name])
+                
     def _print_ood_training_details(self, memory_batch: dict, all_heads: list):
         """
         Print details about OOD training for debugging
