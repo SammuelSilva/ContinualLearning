@@ -261,58 +261,183 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
         
         return features
     
-    def predict_task_id(self, x: torch.Tensor) -> Tuple[List[str], torch.Tensor]:
+    def predict_task_id(self, x: torch.Tensor, unknown_threshold: float = 0.3) -> Tuple[List[str], List[float]]:
         """
-        Predict task ID using unknown class probabilities
-        Checks both specialists and merged blocks
+        FIXED: Use unknown class probability as the PRIMARY routing mechanism
+        
+        Logic:
+        1. For each head, check if it classifies the input as "unknown"
+        2. The head with the LOWEST "unknown" probability gets the sample
+        3. If ALL heads say "unknown" above threshold, route to most recent task
         """
-        batch_size = x.shape[0]
-        all_candidates = {}
+        self.eval()
+        batch_size = x.size(0)
         
         with torch.no_grad():
-            # Get backbone features once
-            features = self.backbone(x)
+            # Get features once
+            features = self._get_features(x)
             
-            # Check all specialist tasks
+            # Test all heads and get their "unknown" probabilities
+            head_unknown_probs = {}
+            head_confidence_scores = {}
+            
+            # Test specialist tasks
             for task_id in self.specialist_tasks:
                 if task_id in self.task_heads:
-                    logits = self.task_heads[task_id](features)
-                    probs = F.softmax(logits, dim=-1)
-                    unknown_probs = probs[:, -1]  # Last class is unknown
-                    all_candidates[task_id] = unknown_probs
+                    try:
+                        logits = self.task_heads[task_id](features)
+                        probs = F.softmax(logits, dim=1)
+                        
+                        # Get "unknown" class probability (last class)
+                        unknown_prob = probs[:, -1]  # Shape: [batch_size]
+                        
+                        # Get confidence in actual classes (excluding unknown)
+                        class_probs = probs[:, :-1]  # Exclude unknown class
+                        max_class_prob = torch.max(class_probs, dim=1)[0]  # Max probability among real classes
+                        
+                        head_unknown_probs[task_id] = unknown_prob
+                        head_confidence_scores[task_id] = max_class_prob
+                        
+                    except Exception as e:
+                        print(f"Error with specialist task {task_id}: {e}")
+                        continue
             
-            # Check all tasks in merged blocks
+            # Test merged blocks
             for block in self.merged_blocks:
-                # First check block confidence
-                block_confidence = block.compute_block_confidence(features)
-                
                 for task_id in block.task_ids:
-                    logits = block.task_heads[task_id](features)
-                    probs = F.softmax(logits, dim=-1)
-                    unknown_probs = probs[:, -1]
+                    try:
+                        logits = block.task_heads[task_id](features)
+                        probs = F.softmax(logits, dim=1)
+                        
+                        unknown_prob = probs[:, -1]
+                        class_probs = probs[:, :-1]
+                        max_class_prob = torch.max(class_probs, dim=1)[0]
+                        
+                        head_unknown_probs[task_id] = unknown_prob
+                        head_confidence_scores[task_id] = max_class_prob
+                        
+                    except Exception as e:
+                        print(f"Error with merged task {task_id}: {e}")
+                        continue
+            
+            # Route each sample based on unknown probabilities
+            predicted_tasks = []
+            confidences = []
+            
+            # Get task list (sorted by creation order - most recent last)
+            all_tasks = list(head_unknown_probs.keys())
+            
+            for i in range(batch_size):
+                best_task = None
+                best_score = float('inf')  # We want the LOWEST unknown probability
+                best_confidence = 0.0
+                
+                # Find the head that is MOST confident this sample belongs to it
+                # (i.e., has the LOWEST unknown probability)
+                for task_id in all_tasks:
+                    unknown_prob = head_unknown_probs[task_id][i].item()
+                    class_confidence = head_confidence_scores[task_id][i].item()
                     
-                    # Weight by block confidence
-                    weighted_unknown = unknown_probs * (2 - block_confidence)
-                    all_candidates[task_id] = weighted_unknown
+                    # The "score" is the unknown probability (lower is better)
+                    if unknown_prob < best_score:
+                        best_score = unknown_prob
+                        best_task = task_id
+                        best_confidence = class_confidence
+                
+                # If ALL heads think this is "unknown" (above threshold), 
+                # route to the most recent task as fallback
+                if best_score > unknown_threshold:
+                    print(f"Sample {i}: All heads uncertain (best unknown prob: {best_score:.3f}), routing to most recent task")
+                    best_task = all_tasks[-1]  # Most recent task
+                    best_confidence = 1.0 - best_score  # Convert unknown prob to confidence
+                else:
+                    # Convert unknown probability to confidence measure
+                    best_confidence = 1.0 - best_score
+                
+                predicted_tasks.append(best_task)
+                confidences.append(best_confidence)
         
-        # Select task with lowest unknown probability for each sample
-        predicted_tasks = []
-        confidences = []
+        return predicted_tasks, confidences
+
+    def debug_unknown_class_routing(self, x: torch.Tensor, true_task_ids: List[str] = None):
+        """
+        Debug the unknown class-based routing mechanism
+        """
+        print("\n=== Unknown Class Routing Debug ===")
         
-        for i in range(batch_size):
-            min_unknown = float('inf')
-            best_task = None
+        self.eval()
+        with torch.no_grad():
+            features = self._get_features(x[:4])  # First 4 samples
             
-            for task_id, unknown_probs in all_candidates.items():
-                if unknown_probs[i] < min_unknown:
-                    min_unknown = unknown_probs[i]
-                    best_task = task_id
+            print(f"Testing {features.shape[0]} samples...")
             
-            predicted_tasks.append(best_task if best_task else "task_0")
-            confidences.append(1 - min_unknown if best_task else 0.0)
-        
-        return predicted_tasks, torch.tensor(confidences, device=x.device)
+            # Test each head
+            for task_id in sorted(self.specialist_tasks):
+                if task_id in self.task_heads:
+                    head = self.task_heads[task_id]
+                    logits = head(features)
+                    probs = F.softmax(logits, dim=1)
+                    
+                    print(f"\nHead {task_id}:")
+                    for i in range(features.shape[0]):
+                        unknown_prob = probs[i, -1].item()
+                        class_probs = probs[i, :-1]
+                        max_class_prob = torch.max(class_probs).item()
+                        predicted_class = torch.argmax(class_probs).item()
+                        
+                        verdict = "ACCEPT" if unknown_prob < 0.3 else "REJECT"
+                        print(f"  Sample {i}: Unknown={unknown_prob:.3f}, MaxClass={max_class_prob:.3f} (class {predicted_class}) -> {verdict}")
+            
+            # Show actual routing decisions
+            pred_tasks, confs = self.predict_task_id(x[:4])
+            print(f"\nRouting Decisions:")
+            for i in range(4):
+                true_task = true_task_ids[i] if true_task_ids else "?"
+                print(f"  Sample {i}: {true_task} -> {pred_tasks[i]} (conf: {confs[i]:.3f})")
     
+    def validate_unknown_class_training(self, memory_buffer):
+        """
+        Check if unknown class training worked properly
+        """
+        print("\n=== Unknown Class Training Validation ===")
+        
+        if len(memory_buffer) == 0:
+            return
+        
+        # Sample data from buffer
+        memory_batch = memory_buffer.sample(batch_size=32)
+        mem_images = memory_batch['images'].to(self.device)
+        mem_task_ids = memory_batch.get('task_ids', [])
+        
+        self.eval()
+        with torch.no_grad():
+            features = self._get_features(mem_images)
+            
+            # Test each head's ability to reject other tasks' data
+            for task_id in self.specialist_tasks:
+                if task_id in self.task_heads:
+                    head = self.task_heads[task_id]
+                    logits = head(features)
+                    probs = F.softmax(logits, dim=1)
+                    
+                    # Separate own vs other task samples
+                    own_indices = [i for i, tid in enumerate(mem_task_ids) if tid == task_id]
+                    other_indices = [i for i, tid in enumerate(mem_task_ids) if tid != task_id]
+                    
+                    if own_indices and other_indices:
+                        # Check unknown probabilities
+                        own_unknown = probs[own_indices, -1].mean().item()
+                        other_unknown = probs[other_indices, -1].mean().item()
+                        
+                        print(f"Head {task_id}:")
+                        print(f"  Own task unknown prob: {own_unknown:.3f} (should be LOW)")
+                        print(f"  Other task unknown prob: {other_unknown:.3f} (should be HIGH)")
+                        
+                        if own_unknown > 0.5:
+                            print(f"  ⚠️ WARNING: Head rejects its own task data!")
+                        if other_unknown < 0.3:
+                            print(f"  ⚠️ WARNING: Head accepts other tasks' data!")
+                            
     def get_trainable_parameters(self) -> List[nn.Parameter]:
         """Get trainable parameters for current task"""
         if self.current_task is None:
