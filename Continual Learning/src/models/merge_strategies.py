@@ -167,6 +167,24 @@ class IntelligentLoRAMerger:
         
         return groups
     
+    def _compute_delta_W(self, lora: nn.Module) -> torch.Tensor:
+        """Extract the effective weight update from LoRA"""
+        if hasattr(lora, 'lora_B') and hasattr(lora, 'lora_A'):
+            # It's a LoRALayer
+            return lora.lora_B @ lora.lora_A
+        elif hasattr(lora, 'attention_adapters'):  
+            # It's a TaskSpecificLoRA - get first layer's Q adapter as representative
+            for adapter in lora.attention_adapters:
+                if adapter is not None and 'q' in adapter.lora_modules:
+                    q_lora = adapter.lora_modules['q']
+                    return q_lora.lora_B @ q_lora.lora_A
+        elif hasattr(lora, 'adapters'):
+            # Alternative structure - get first adapter
+            if len(lora.adapters) > 0 and 'q' in lora.adapters[0]:
+                return lora.adapters[0]['q'].lora_B @ lora.adapters[0]['q'].lora_A
+        
+        raise ValueError(f"Unknown LoRA format: {type(lora)}")
+    
     def _get_ood_data_from_buffer(self, memory_buffer, task_id: str, num_samples: int):
         """
         Get OOD data (from other tasks) from memory buffer
