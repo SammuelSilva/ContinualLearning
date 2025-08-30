@@ -166,8 +166,12 @@ class HierarchicalTrainer(ContinualTrainer):
                     # Forward pass with checkpointing
                     logits = self._forward_with_checkpoint(images, task_id)
                     
-                    # Classification loss
-                    loss = F.cross_entropy(logits[:, :-1], labels)
+                    # Debug: Print shapes to understand the issue
+                    print(f"Debug - Logits shape: {logits.shape}, Labels shape: {labels.shape}")
+                    
+                    # Classification loss - Remove unknown class logit
+                    class_logits = logits[:, :-1]  # Remove last column (unknown class)
+                    loss = F.cross_entropy(class_logits, labels)
                     
                     # Memory replay for preventing forgetting
                     if len(self.memory_buffer) > 0:
@@ -182,7 +186,10 @@ class HierarchicalTrainer(ContinualTrainer):
             else:
                 # Standard precision
                 logits = self._forward_with_checkpoint(images, task_id)
-                loss = F.cross_entropy(logits[:, :-1], labels)
+                
+                # Classification loss - Remove unknown class logit
+                class_logits = logits[:, :-1]  # Remove last column (unknown class)
+                loss = F.cross_entropy(class_logits, labels)
                 
                 if len(self.memory_buffer) > 0:
                     loss = self._add_memory_replay_loss(loss, task_id, batch_size=8)
@@ -193,7 +200,8 @@ class HierarchicalTrainer(ContinualTrainer):
             
             # Metrics
             with torch.no_grad():
-                predictions = torch.argmax(logits[:, :-1], dim=1)
+                class_logits = logits[:, :-1]  # Remove unknown class for predictions
+                predictions = torch.argmax(class_logits, dim=1)
                 correct += (predictions == labels).sum().item()
                 total += labels.size(0)
                 total_loss += loss.item()
@@ -201,8 +209,8 @@ class HierarchicalTrainer(ContinualTrainer):
             pbar.set_postfix({'loss': f'{loss.item():.4f}', 
                             'acc': f'{100*correct/total:.1f}%'})
                 
-        return total_loss / len(train_loader), 100 * correct / total 
-
+        return total_loss / len(train_loader), 100 * correct / total
+    
     def _forward_with_checkpoint(self, images: torch.Tensor, task_id: str) -> torch.Tensor:
         """Forward pass using gradient checkpointing"""
         x = self.model.backbone.patch_embed(images)
@@ -236,6 +244,37 @@ class HierarchicalTrainer(ContinualTrainer):
         
         return logits
 
+    def _validate_checkpoint(self, val_loader: DataLoader, task_id: str, use_amp: bool) -> Tuple[float, float]:
+        """
+        Validation with optional mixed precision
+        """
+        self.model.eval()
+        total_loss = 0
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for images, labels in val_loader:
+                images = images.to(self.device)
+                labels = labels.to(self.device)
+                
+                if use_amp:
+                    with autocast():
+                        logits = self.model(images, task_id=task_id)
+                        class_logits = logits[:, :-1]  # Remove unknown class
+                        loss = F.cross_entropy(class_logits, labels)
+                else:
+                    logits = self.model(images, task_id=task_id)
+                    class_logits = logits[:, :-1]  # Remove unknown class
+                    loss = F.cross_entropy(class_logits, labels)
+                
+                predictions = torch.argmax(class_logits, dim=1)
+                correct += (predictions == labels).sum().item()
+                total += labels.size(0)
+                total_loss += loss.item()
+        
+        return total_loss / len(val_loader), 100 * correct / total
+
     def _add_memory_replay_loss(self, loss: torch.Tensor, task_id: str, batch_size: int = 32) -> torch.Tensor:
         """
         Add memory replay loss for preventing forgetting
@@ -258,45 +297,16 @@ class HierarchicalTrainer(ContinualTrainer):
             if mem_task_id == task_id:
                 adjusted_labels.append(label.item())
             else:
+                # Use the unknown class index (last class)
                 adjusted_labels.append(mem_logits.shape[1] - 1)  # Unknown class
         
         adjusted_labels = torch.tensor(adjusted_labels, device=self.device)
         
-        # Weighted loss for memory samples
+        # Use full logits (including unknown class) for memory replay
         memory_loss = F.cross_entropy(mem_logits, adjusted_labels)
         
         # Combine losses
         return loss + 0.3 * memory_loss
-
-    def _validate_checkpoint(self, val_loader: DataLoader, task_id: str, use_amp: bool) -> Tuple[float, float]:
-        """
-        Validation with optional mixed precision
-        """
-        self.model.eval()
-        total_loss = 0
-        correct = 0
-        total = 0
-        
-        with torch.no_grad():
-            for images, labels in val_loader:
-                images = images.to(self.device)
-                labels = labels.to(self.device)
-                
-                if use_amp:
-                    with autocast():
-                        logits = self.model(images, task_id=task_id)
-                        loss = F.cross_entropy(logits[:, :-1], labels)
-                else:
-                    logits = self.model(images, task_id=task_id)
-                    loss = F.cross_entropy(logits[:, :-1], labels)
-                
-                predictions = torch.argmax(logits[:, :-1], dim=1)
-                correct += (predictions == labels).sum().item()
-                total += labels.size(0)
-                total_loss += loss.item()
-        
-        return total_loss / len(val_loader), 100 * correct / total
-
 
     def align_ood_detection_checkpoint(self, num_epochs=3, use_amp=True):
         """
