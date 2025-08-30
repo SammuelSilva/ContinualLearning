@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import os
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from torch.utils.checkpoint import checkpoint
 from torch.utils.data import DataLoader, TensorDataset
 from typing import Dict, List, Optional, Tuple
@@ -171,11 +171,6 @@ class HierarchicalTrainer(ContinualTrainer):
                     
                     # Classification loss - Remove unknown class logit
                     class_logits = logits[:, :-1]  # Remove last column (unknown class)
-                    print(f"Logits shape: {logits.shape}")
-                    print(f"Labels shape: {labels.shape}")
-                    print(f"Labels dtype: {labels.dtype}")
-                    print(f"Labels range: {labels.min().item()} to {labels.max().item()}")
-
                     loss = F.cross_entropy(class_logits, labels)
                     
                     # Memory replay for preventing forgetting
@@ -224,21 +219,36 @@ class HierarchicalTrainer(ContinualTrainer):
         if hasattr(self.model.backbone, 'cls_token'):
             cls_token = self.model.backbone.cls_token.expand(x.shape[0], -1, -1)
             x = torch.cat((cls_token, x), dim=1)
-
+            
         # For timm models, manually checkpoint each block
         if hasattr(self.model.backbone, 'pos_drop'):
             x = self.model.backbone.pos_drop(x + self.model.backbone.pos_embed)
         
         for block in self.model.backbone.blocks:
+            # Use model.training instead of self.training
             if self.model.training:
-                x = checkpoint(block, x)
+                x = checkpoint(block, x, use_reentrant=False)
             else:
                 x = block(x)
         
         x = self.model.backbone.norm(x)
-        features = self.model.backbone.head(x) if hasattr(self.model.backbone, 'head') else x
         
-        # Get appropriate head
+        # Extract class token (first token) for classification
+        if hasattr(self.model.backbone, 'cls_token'):
+            # Class token is at position 0
+            cls_output = x[:, 0]  # Shape: [batch_size, embed_dim]
+        else:
+            # If no class token, use global average pooling
+            cls_output = x.mean(dim=1)  # Shape: [batch_size, embed_dim]
+        
+        # Apply head if backbone has one
+        if hasattr(self.model.backbone, 'head') and self.model.backbone.head is not None:
+            features = self.model.backbone.head(cls_output)
+        else:
+            features = cls_output
+        
+        # Get appropriate task head
+        logits = None
         if task_id in self.model.task_heads:
             logits = self.model.task_heads[task_id](features)
         else:
@@ -246,6 +256,9 @@ class HierarchicalTrainer(ContinualTrainer):
                 if task_id in block.task_ids:
                     logits = block.task_heads[task_id](features)
                     break
+        
+        if logits is None:
+            raise ValueError(f"No head found for task_id: {task_id}")
         
         return logits
 
