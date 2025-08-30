@@ -224,6 +224,41 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
             print(f"  ❌ Validation failed. Keeping tasks as specialists.")
             return False
     
+    def _get_features(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Extract features from backbone (non-checkpointed version for inference)
+        """
+        x = self.backbone.patch_embed(images)
+        
+        # Add class token if the model expects it
+        if hasattr(self.backbone, 'cls_token'):
+            cls_token = self.backbone.cls_token.expand(x.shape[0], -1, -1)
+            x = torch.cat((cls_token, x), dim=1)
+            
+        # Position embeddings
+        if hasattr(self.backbone, 'pos_drop'):
+            x = self.backbone.pos_drop(x + self.backbone.pos_embed)
+        
+        # Transformer blocks (no checkpointing for inference)
+        for block in self.backbone.blocks:
+            x = block(x)
+        
+        x = self.backbone.norm(x)
+        
+        # Extract class token (first token) for classification
+        if hasattr(self.backbone, 'cls_token'):
+            cls_output = x[:, 0]  # Shape: [batch_size, embed_dim]
+        else:
+            cls_output = x.mean(dim=1)  # Global average pooling
+        
+        # Apply backbone head if it exists
+        if hasattr(self.backbone, 'head') and self.backbone.head is not None:
+            features = self.backbone.head(cls_output)
+        else:
+            features = cls_output
+        
+        return features
+
     def forward(self, x: torch.Tensor, task_id: Optional[str] = None, 
                 return_features: bool = False) -> torch.Tensor:
         """
