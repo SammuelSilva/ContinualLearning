@@ -219,8 +219,7 @@ def create_model(args) -> torch.nn.Module:
             use_pretrained=True,
             max_tasks_per_block=args.max_tasks_per_block,
             min_tasks_to_merge=args.min_tasks_to_merge,
-            merge_config=merge_config,
-            include_unknown_head=args.use_unknown_data  # Enable unknown head if using unknown data
+            merge_config=merge_config
         )
 
         print(f"  - Tasks per block: {args.max_tasks_per_block}")
