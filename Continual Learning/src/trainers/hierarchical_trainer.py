@@ -531,7 +531,8 @@ class HierarchicalTrainer:
             if self.metrics is not None:
                 task_idx = int(task_id.split('_')[1])
                 self.metrics.update(task_idx, task_idx, metrics['accuracy'])
-        
+
+            print(f"Task [{task_id}] Acc:: {metrics['accuracy']}")
         return results
     
     def get_metrics_summary(self) -> Dict:
