@@ -139,7 +139,7 @@ class HierarchicalTrainer(ContinualTrainer):
         
         # Run OOD alignment if we have memory
         if len(self.memory_buffer) > 0:
-            self.align_ood_detection_efficient(num_epochs=5)
+            self.align_ood_detection_efficient(num_epochs=3)
         
         # Track metrics
         stats = self.model.get_statistics()
