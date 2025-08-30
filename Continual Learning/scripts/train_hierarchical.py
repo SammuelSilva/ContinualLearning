@@ -305,15 +305,14 @@ def create_trainer(model, memory_buffer, args):
     
     return trainer
 
-
 def run_training(args, model, dataset, trainer, memory_buffer, logger):
-    """Main training loop with unknown data handling"""
+    """Main training loop with unknown data handling and buffer management"""
     
     # Visualization setup
     visualizer = None
     if args.visualize:
         visualizer = HierarchicalVisualizer(save_dir=args.experiment_dir)
-        
+    
     # Track metrics
     all_results = {}
     task_accuracies = {}
@@ -358,6 +357,10 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         num_classes = args.classes_per_task + 1 if args.use_unknown_data else args.classes_per_task
         model.add_task(task_id, num_classes)
         
+        # Set memory buffer reference in model if hierarchical
+        if args.use_hierarchical and hasattr(model, 'set_memory_buffer'):
+            model.set_memory_buffer(memory_buffer)
+        
         # Train on current task
         print(f"Training on {task_id}...")
         best_acc = trainer.train_task(
@@ -371,6 +374,77 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         )
         
         print(f"Best validation accuracy: {best_acc:.2f}%")
+        
+        # Mark task as trained (for hierarchical model)
+        if args.use_hierarchical:
+            model.mark_task_trained(task_id)
+        
+        # UPDATE MEMORY BUFFER with current task data
+        if memory_buffer is not None:
+            print(f"\n📦 Updating memory buffer with {task_id} samples...")
+            
+            buffer_images = []
+            buffer_labels = []
+            buffer_features = [] if args.selection_strategy == 'herding' else None
+            
+            model.eval()
+            with torch.no_grad():
+                for batch_idx, batch_data in enumerate(train_loader):
+                    if batch_idx >= 5:  # Limit batches for buffer
+                        break
+                    
+                    if len(batch_data) == 3:
+                        images, labels, unknown_flags = batch_data
+                        # Only store known samples
+                        known_mask = (unknown_flags == 0)
+                        if known_mask.sum() == 0:
+                            continue
+                        images = images[known_mask]
+                        labels = labels[known_mask]
+                    else:
+                        images, labels = batch_data
+                    
+                    images = images.to(args.device)
+                    buffer_images.append(images.cpu())
+                    buffer_labels.append(labels.cpu())
+                    
+                    # Extract features if using herding
+                    if args.selection_strategy == 'herding':
+                        features = model.forward(images, task_id=task_id, return_features=True)
+                        if isinstance(features, dict):
+                            features = features.get('features', features)
+                        buffer_features.append(features.cpu())
+            
+            # Update buffer
+            if buffer_images:
+                all_images = torch.cat(buffer_images, dim=0)
+                all_labels = torch.cat(buffer_labels, dim=0)
+                all_features = torch.cat(buffer_features, dim=0) if buffer_features else None
+                
+                memory_buffer.update(
+                    images=all_images,
+                    labels=all_labels,
+                    task_id=task_id,
+                    features=all_features
+                )
+                
+                # Print buffer statistics
+                buffer_stats = memory_buffer.get_statistics()
+                print(f"  ✓ Buffer updated:")
+                print(f"    - Total samples: {buffer_stats['total_samples']}/{memory_buffer.buffer_size}")
+                print(f"    - Classes: {buffer_stats['num_classes']}")
+                print(f"    - Tasks: {buffer_stats['num_tasks']}")
+                for tid, count in buffer_stats['samples_per_task'].items():
+                    print(f"    - {tid}: {count} samples")
+        
+        # EVALUATE ON BUFFER after updating (skip first task)
+        if memory_buffer is not None and task_idx > 0 and len(memory_buffer) > 0:
+            print(f"\n🔍 Evaluating model on memory buffer...")
+            buffer_metrics = trainer.evaluate_buffer_metrics(task_id, task_idx)
+            
+            if not hasattr(trainer, 'buffer_metrics_history'):
+                trainer.buffer_metrics_history = {}
+            trainer.buffer_metrics_history[task_idx] = buffer_metrics
         
         # Store unknown metrics if available
         if args.use_unknown_data and hasattr(trainer, 'get_unknown_metrics'):
@@ -470,7 +544,6 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         )
     
     return results
-
 
 def create_visualizations(visualizer, model, trainer, task_idx, args, unknown_metrics=None):
     """Create visualizations during training"""

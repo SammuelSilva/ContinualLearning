@@ -137,7 +137,7 @@ class HierarchicalTrainer:
         task_idx: int,
         epoch: int
     ) -> Tuple[float, Dict]:
-        """Train for one epoch with unknown sample handling"""
+        """Train for one epoch with unknown sample handling and memory replay"""
         
         self.model.train()
         total_loss = 0
@@ -147,6 +147,7 @@ class HierarchicalTrainer:
         unknown_fp = 0
         unknown_tn = 0
         unknown_fn = 0
+        replay_count = 0
         
         pbar = tqdm(train_loader, desc=f"Training epoch {epoch+1}")
         
@@ -156,27 +157,51 @@ class HierarchicalTrainer:
                 images, labels, unknown_flags = batch_data
                 images = images.to(self.device)
                 labels = labels.to(self.device)
-                unknown_flags = unknown_flags.to(self.device).float()  # Ensure float
+                unknown_flags = unknown_flags.to(self.device).float()
                 has_unknown = True
             else:
                 images, labels = batch_data
                 images = images.to(self.device)
                 labels = labels.to(self.device)
-                unknown_flags = torch.zeros_like(labels, dtype=torch.float)  # Explicit float type
+                unknown_flags = torch.zeros_like(labels, dtype=torch.float)
                 has_unknown = False
+            
+            # MEMORY REPLAY: Add samples from buffer if available
+            if self.memory_buffer is not None and len(self.memory_buffer) > 0 and task_idx > 0:
+                # Sample half the batch size from buffer
+                replay_batch_size = min(len(images) // 2, len(self.memory_buffer))
+                
+                if replay_batch_size > 0:
+                    replay_data = self.memory_buffer.sample(batch_size=replay_batch_size)
+                    
+                    if replay_data['images'].shape[0] > 0:
+                        replay_images = replay_data['images'].to(self.device)
+                        replay_labels = replay_data['labels'].to(self.device)
+                        
+                        # Mark replay samples as unknown for current task
+                        replay_unknown_flags = torch.ones(
+                            len(replay_images), 
+                            dtype=torch.float, 
+                            device=self.device
+                        )
+                        
+                        # Combine current batch with replay samples
+                        images = torch.cat([images, replay_images], dim=0)
+                        labels = torch.cat([labels, replay_labels], dim=0)
+                        unknown_flags = torch.cat([unknown_flags, replay_unknown_flags], dim=0)
+                        has_unknown = True
+                        replay_count += replay_batch_size
             
             optimizer.zero_grad()
             
             # Forward pass
             outputs = self.model(images, task_id=task_id)
             
-            # Handle case where model returns tensor directly instead of dict
+            # Handle different output formats
             if isinstance(outputs, torch.Tensor):
-                # Model returned logits directly, wrap in expected format
                 logits = outputs
                 outputs = {'logits': logits}
             elif isinstance(outputs, dict):
-                # Model returned dictionary as expected
                 if 'logits' not in outputs:
                     raise ValueError("Model output dictionary must contain 'logits' key")
                 logits = outputs['logits']
@@ -205,8 +230,8 @@ class HierarchicalTrainer:
                 if has_unknown:
                     known_mask = (unknown_flags == 0)
                     if known_mask.sum() > 0:
-                        known_logits = logits[known_mask]  # Shape: [num_known, num_classes]
-                        known_labels = labels[known_mask]   # Shape: [num_known]
+                        known_logits = logits[known_mask]
+                        known_labels = labels[known_mask]
                         _, predicted = known_logits.max(1)
                         correct += predicted.eq(known_labels).sum().item()
                         total += known_mask.sum().item()
@@ -214,12 +239,12 @@ class HierarchicalTrainer:
                     # Calculate unknown detection metrics
                     if 'unknown_score' in outputs:
                         unknown_scores = outputs['unknown_score'].squeeze()
-                        if unknown_scores.dim() == 0:  # Handle single sample case
+                        if unknown_scores.dim() == 0:
                             unknown_scores = unknown_scores.unsqueeze(0)
                         
                         unknown_pred = (torch.sigmoid(unknown_scores) > 0.5).float()
                         
-                        # Ensure same shape for comparison
+                        # Ensure same shape
                         if unknown_pred.shape != unknown_flags.shape:
                             if unknown_flags.dim() > unknown_pred.dim():
                                 unknown_pred = unknown_pred.squeeze()
@@ -239,6 +264,7 @@ class HierarchicalTrainer:
             pbar.set_postfix({
                 'loss': f'{loss.item():.4f}',
                 'acc': f'{100. * correct / total:.1f}%' if total > 0 else '0.0%',
+                'replay': replay_count,
                 'lr': f'{scheduler.get_last_lr()[0]:.2e}'
             })
         
@@ -247,7 +273,8 @@ class HierarchicalTrainer:
         
         metrics = {
             'accuracy': accuracy,
-            'loss': total_loss / len(train_loader)
+            'loss': total_loss / len(train_loader),
+            'replay_samples': replay_count
         }
         
         # Add unknown detection metrics if applicable
@@ -262,6 +289,9 @@ class HierarchicalTrainer:
                 'unknown_f1': f1,
                 'unknown_accuracy': (unknown_tp + unknown_tn) / (unknown_tp + unknown_fp + unknown_tn + unknown_fn)
             })
+        
+        if replay_count > 0:
+            print(f"  Used {replay_count} replay samples from memory buffer")
         
         return total_loss / len(train_loader), metrics
     
@@ -541,3 +571,151 @@ class HierarchicalTrainer:
             return self.metrics.get_summary()
         else:
             return {}
+
+    def evaluate_buffer_metrics(self, task_id: str, task_idx: int):
+        """
+        Evaluate model performance on memory buffer samples.
+        Track routing accuracy and per-task metrics.
+        """
+        if self.memory_buffer is None or len(self.memory_buffer) == 0:
+            print("No samples in memory buffer to evaluate")
+            return
+        
+        print(f"\n{'='*60}")
+        print(f"BUFFER EVALUATION AFTER TASK {task_idx}")
+        print(f"{'='*60}")
+        
+        # Sample from buffer
+        batch_size = min(256, len(self.memory_buffer))
+        memory_batch = self.memory_buffer.sample(batch_size=batch_size)
+        
+        images = memory_batch['images'].to(self.device)
+        labels = memory_batch['labels'].to(self.device)
+        task_ids_true = memory_batch.get('task_ids', [])
+        
+        self.model.eval()
+        with torch.no_grad():
+            # Get routing predictions
+            predicted_tasks, confidences = self.model.predict_task_id(images)
+            
+            # Track routing accuracy per task
+            routing_stats = {}
+            task_accuracies = {}
+            
+            # Get unique tasks in buffer
+            unique_tasks = list(set(task_ids_true))
+            
+            for src_task in unique_tasks:
+                # Find samples from this task
+                task_mask = torch.tensor([tid == src_task for tid in task_ids_true], device=self.device)
+                if task_mask.sum() == 0:
+                    continue
+                
+                task_samples = images[task_mask]
+                task_labels = labels[task_mask]
+                task_predicted = [predicted_tasks[i] for i, m in enumerate(task_mask) if m]
+                
+                # Calculate routing accuracy for this task
+                correct_routing = sum(1 for pred in task_predicted if pred == src_task)
+                routing_accuracy = 100.0 * correct_routing / len(task_predicted)
+                
+                # Track where samples were misrouted
+                misrouted_to = {}
+                for pred in task_predicted:
+                    if pred != src_task:
+                        misrouted_to[pred] = misrouted_to.get(pred, 0) + 1
+                
+                routing_stats[src_task] = {
+                    'routing_accuracy': routing_accuracy,
+                    'total_samples': len(task_predicted),
+                    'correct_routing': correct_routing,
+                    'misrouted_to': misrouted_to
+                }
+                
+                # Calculate classification accuracy for correctly routed samples
+                correctly_routed_mask = torch.tensor([pred == src_task for pred in task_predicted], device=self.device)
+                if correctly_routed_mask.sum() > 0:
+                    correct_samples = task_samples[correctly_routed_mask]
+                    correct_labels = task_labels[correctly_routed_mask]
+                    
+                    # Get predictions for correctly routed samples
+                    logits = self.model(correct_samples, task_id=src_task)
+                    if isinstance(logits, dict):
+                        logits = logits['logits']
+                    
+                    # Exclude unknown class for accuracy calculation
+                    logits_known = logits[:, :-1]
+                    _, predicted = logits_known.max(1)
+                    
+                    task_acc = 100.0 * predicted.eq(correct_labels).sum().item() / len(correct_labels)
+                    task_accuracies[src_task] = task_acc
+                else:
+                    task_accuracies[src_task] = 0.0
+            
+            # Calculate overall metrics
+            total_samples = len(images)
+            correct_routing_total = sum(1 for i, true_task in enumerate(task_ids_true) 
+                                    if predicted_tasks[i] == true_task)
+            overall_routing_acc = 100.0 * correct_routing_total / total_samples
+            
+            # Calculate overall accuracy (only on correctly routed samples)
+            correct_predictions = 0
+            total_evaluated = 0
+            
+            for i, (true_task, pred_task) in enumerate(zip(task_ids_true, predicted_tasks)):
+                if true_task == pred_task:
+                    # This sample was correctly routed
+                    logits = self.model(images[i:i+1], task_id=true_task)
+                    if isinstance(logits, dict):
+                        logits = logits['logits']
+                    
+                    logits_known = logits[:, :-1]
+                    _, predicted = logits_known.max(1)
+                    
+                    if predicted.item() == labels[i].item():
+                        correct_predictions += 1
+                    total_evaluated += 1
+            
+            overall_accuracy = 100.0 * correct_predictions / total_evaluated if total_evaluated > 0 else 0.0
+            
+            # Print results
+            print(f"\nBuffer contains {total_samples} samples from {len(unique_tasks)} tasks")
+            print(f"\n📊 OVERALL METRICS:")
+            print(f"  • Overall Routing Accuracy: {overall_routing_acc:.2f}%")
+            print(f"  • Overall Classification Accuracy: {overall_accuracy:.2f}%")
+            print(f"  • Routing Error Rate: {100.0 - overall_routing_acc:.2f}%")
+            
+            print(f"\n📈 PER-TASK ROUTING METRICS:")
+            for task in sorted(routing_stats.keys()):
+                stats = routing_stats[task]
+                print(f"\n  Task {task}:")
+                print(f"    • Samples: {stats['total_samples']}")
+                print(f"    • Routing Accuracy: {stats['routing_accuracy']:.2f}%")
+                print(f"    • Classification Accuracy: {task_accuracies.get(task, 0.0):.2f}%")
+                
+                if stats['misrouted_to']:
+                    print(f"    • Misrouted to:")
+                    for wrong_task, count in sorted(stats['misrouted_to'].items()):
+                        percentage = 100.0 * count / stats['total_samples']
+                        print(f"      - {wrong_task}: {count} samples ({percentage:.1f}%)")
+            
+            print(f"{'='*60}\n")
+            
+            # Store metrics for later analysis
+            if not hasattr(self, 'buffer_eval_history'):
+                self.buffer_eval_history = []
+            
+            self.buffer_eval_history.append({
+                'task_idx': task_idx,
+                'overall_routing_acc': overall_routing_acc,
+                'overall_accuracy': overall_accuracy,
+                'per_task_stats': routing_stats,
+                'per_task_accuracy': task_accuracies
+            })
+            
+            return {
+                'overall_routing_accuracy': overall_routing_acc,
+                'overall_accuracy': overall_accuracy,
+                'routing_stats': routing_stats,
+                'task_accuracies': task_accuracies
+            }

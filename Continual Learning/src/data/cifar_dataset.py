@@ -261,6 +261,7 @@ class EnhancedContinualCIFAR100:
         
         # Mix with unknown data if requested
         if include_unknown and self.use_unknown_data and unknown_dataset is not None:
+            print("Including unknown data with ratio:", self.get_task_unknown_ratio(task_id))
             unknown_ratio = self.get_task_unknown_ratio(task_id)
             return MixedTaskDataset(
                 task_dataset=task_dataset,
