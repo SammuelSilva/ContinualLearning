@@ -255,7 +255,8 @@ def create_dataset(args):
             unknown_ratio=args.unknown_ratio,
             unknown_ratio_decay=args.unknown_ratio_decay,
             use_unknown_data=args.use_unknown_data,
-            seed=args.seed
+            seed=args.seed,
+            cache_current_task_only=True
         )
     else:
         raise NotImplementedError(f"Dataset {args.dataset} not implemented")
@@ -311,7 +312,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
     Modified for memory efficiency - clears cache between tasks
     """
     
-    # Visualization setup
+        # Visualization setup
     visualizer = None
     if args.visualize:
         visualizer = HierarchicalVisualizer(save_dir=args.experiment_dir)
@@ -339,7 +340,8 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         print(f"TASK {task_idx + 1}/{args.num_tasks}: {task_id}")
         print(f"{'='*60}")
         
-        # Clear GPU cache before each task
+        # MEMORY MANAGEMENT: Clear everything before starting new task
+        dataset.clear_cache()  # Clear dataset cache
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
@@ -351,7 +353,8 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             batch_size=args.batch_size,
             num_workers=min(args.num_workers, 2),  # Limit workers for memory
             include_unknown_train=args.use_unknown_data,
-            include_unknown_test=args.include_unknown_test
+            include_unknown_test=args.include_unknown_test,
+            pin_memory=False  # IMPORTANT: Keep data on CPU
         )
         
         # Log dataset statistics
@@ -370,7 +373,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         if args.use_hierarchical and hasattr(model, 'set_memory_buffer'):
             model.set_memory_buffer(memory_buffer)
         
-        # Train on current task (trainer already has memory-efficient implementation)
+        # Train on current task
         print(f"Training on {task_id}...")
         best_acc = trainer.train_task(
             task_id=task_id,
@@ -399,7 +402,8 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
                 num_batches=3  # Reduced from 5 to 3 for memory
             )
         
-        # Clear cache after buffer update
+        # MEMORY MANAGEMENT: Clear cache after buffer update
+        dataset.clear_cache()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
                     
@@ -421,32 +425,37 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         
         # Evaluate on all tasks (one at a time to save memory)
         print(f"\nEvaluating on all {task_idx + 1} tasks...")
-        test_loaders = {}
         current_results = {}
         
         for i in range(task_idx + 1):
+            # MEMORY MANAGEMENT: Clear cache before loading next task
+            dataset.clear_cache()
+            
             # Get loader for single task
             _, _, test_loader_i = dataset.get_task_loaders(
                 i,
                 batch_size=args.batch_size,
                 num_workers=min(args.num_workers, 2),
                 include_unknown_train=False,
-                include_unknown_test=args.include_unknown_test
+                include_unknown_test=args.include_unknown_test,
+                pin_memory=False  # Keep on CPU
             )
             task_i_id = f"task_{i}"
-            test_loaders[task_i_id] = test_loader_i
             
             # Evaluate immediately and store result
             with torch.no_grad():
                 acc = trainer.evaluate_task(test_loader_i, task_i_id)
                 current_results[task_i_id] = acc
             
-            # Clear loader from memory
+            # MEMORY MANAGEMENT: Clear loader from memory
             del test_loader_i
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         
         task_accuracies[task_idx] = current_results
+        
+        # MEMORY MANAGEMENT: Clear dataset cache after evaluation
+        dataset.clear_cache()
         
         # Save checkpoint state
         save_checkpoint_state(
@@ -474,6 +483,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             print(f"  - Merge attempts: {stats['merge_attempts']}")
             print(f"  - Successful merges: {stats['successful_merges']}")
         
+        # MEMORY MANAGEMENT: Final cleanup for this task
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -482,15 +492,22 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
     print("FINAL EVALUATION ON ALL TASKS")
     print(f"{'='*60}")
     
+    # MEMORY MANAGEMENT: Clear cache before final evaluation
+    dataset.clear_cache()
+    
     # Evaluate one task at a time for memory efficiency
     final_results = {}
     for i in range(args.num_tasks):
+        # MEMORY MANAGEMENT: Clear cache before each task
+        dataset.clear_cache()
+        
         _, _, test_loader = dataset.get_task_loaders(
             i,
             batch_size=args.batch_size,
             num_workers=min(args.num_workers, 2),
             include_unknown_train=False,
-            include_unknown_test=args.include_unknown_test
+            include_unknown_test=args.include_unknown_test,
+            pin_memory=False  # Keep on CPU
         )
         task_i_id = f"task_{i}"
         
@@ -501,9 +518,13 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
                 acc = trainer.evaluate_task(test_loader, task_i_id)
             final_results[task_i_id] = acc
         
+        # MEMORY MANAGEMENT: Clear after each evaluation
         del test_loader
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+    
+    # MEMORY MANAGEMENT: Unload all datasets after training completes
+    dataset.unload_all_datasets()
     
     # Get comprehensive metrics
     final_metrics = trainer.get_metrics_summary()
@@ -532,7 +553,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             args, unknown_metrics
         )
     
-    # Final cleanup
+    # MEMORY MANAGEMENT: Final cleanup
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     
