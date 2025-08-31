@@ -35,7 +35,9 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
         max_tasks_per_block: int = 5,
         min_tasks_to_merge: int = 2,
         merge_config: MergeConfig = None,
-        memory_buffer=None
+        memory_buffer=None,
+        gradient_checkpointing: bool = True, 
+        checkpoint_segments: int = 4 
     ):
         super().__init__(
             vit_model_name=vit_model_name,
@@ -43,7 +45,9 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
             lora_config=lora_config,
-            use_pretrained=use_pretrained
+            use_pretrained=use_pretrained,
+            gradient_checkpointing=gradient_checkpointing,
+            checkpoint_segments=checkpoint_segments
         )
         
         # Task management
@@ -338,14 +342,28 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
         block.inject_into_backbone(self.backbone, task_id)
         
         try:
-            # Forward through modified backbone
-            features = self.backbone(x)
+            if self.training and self.gradient_checkpointing:
+                features = self._forward_with_checkpointing(x)
+            else:
+                features = self.backbone(x)
         finally:
             # Always restore
             block.remove_from_backbone(self.backbone)
         
         return features
     
+    def set_gradient_checkpointing(self, enable: bool):
+        """
+        Enable or disable gradient checkpointing
+        """
+        self.gradient_checkpointing = enable
+        
+        # Try to set in backbone if supported
+        if hasattr(self.backbone, 'set_grad_checkpointing'):
+            self.backbone.set_grad_checkpointing(enable)
+        
+        print(f"Gradient checkpointing: {'ENABLED' if enable else 'DISABLED'}")
+
     def predict_task_id(self, x: torch.Tensor, unknown_threshold: float = 0.5, use_cpu: bool = True) -> Tuple[List[str], List[float]]:
         """
         Modified version with CPU option for memory efficiency
