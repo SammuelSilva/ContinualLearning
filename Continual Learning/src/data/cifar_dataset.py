@@ -1,5 +1,6 @@
 """
 Enhanced CIFAR-100 dataset with SVHN as unknown data for continual learning
+Memory-efficient version that keeps data on CPU until needed
 """
 
 import torch
@@ -45,12 +46,14 @@ class SVHNUnknownDataset(Dataset):
     def __getitem__(self, idx):
         image, _ = self.dataset[idx]  # Ignore original label
         # Return -1 as label to indicate unknown/OOD sample
+        # Keep on CPU - will be moved to GPU by DataLoader if needed
         return image, -1
 
 
 class MixedTaskDataset(Dataset):
     """
     Dataset that mixes task-specific data with unknown samples
+    Memory-efficient version that doesn't preload data
     """
     
     def __init__(
@@ -69,7 +72,7 @@ class MixedTaskDataset(Dataset):
         self.task_size = len(task_dataset)
         self.unknown_size = int(self.task_size * unknown_ratio / (1 - unknown_ratio))
         
-        # Sample indices from unknown dataset
+        # Sample indices from unknown dataset (just indices, not data)
         self.unknown_indices = np.random.choice(
             len(unknown_dataset),
             size=min(self.unknown_size, len(unknown_dataset)),
@@ -98,6 +101,7 @@ class MixedTaskDataset(Dataset):
 class EnhancedContinualCIFAR100:
     """
     Enhanced CIFAR-100 dataset with SVHN unknown data for continual learning.
+    Memory-efficient version with lazy loading and CPU storage.
     """
     
     def __init__(
@@ -107,7 +111,7 @@ class EnhancedContinualCIFAR100:
         classes_per_task: int = 10,
         validation_split: float = 0.1,
         unknown_ratio: float = 0.2,
-        unknown_ratio_decay: float = 0.9,  # Decay factor for unknown ratio across tasks
+        unknown_ratio_decay: float = 0.9,
         use_unknown_data: bool = True,
         seed: int = 42
     ):
@@ -167,16 +171,35 @@ class EnhancedContinualCIFAR100:
             )
         ])
         
+        # Initialize datasets as None - will be loaded on demand
+        self.train_dataset = None
+        self.test_dataset = None
+        self.unknown_train_dataset = None
+        self.unknown_test_dataset = None
+        
+        # Create task splits
+        self.task_classes = self._create_task_splits()
+        self.current_task = 0
+        
+        # Track which datasets are loaded
+        self.datasets_loaded = False
+        
+    def _load_datasets_if_needed(self):
+        """Load datasets on first use (lazy loading)"""
+        if self.datasets_loaded:
+            return
+            
+        print("Loading CIFAR-100 datasets...")
         # Load CIFAR-100
         self.train_dataset = datasets.CIFAR100(
-            root=data_root,
+            root=self.data_root,
             train=True,
             download=True,
             transform=self.train_transform
         )
         
         self.test_dataset = datasets.CIFAR100(
-            root=data_root,
+            root=self.data_root,
             train=False,
             download=True,
             transform=self.test_transform
@@ -184,21 +207,21 @@ class EnhancedContinualCIFAR100:
         
         # Load SVHN as unknown data if enabled
         if self.use_unknown_data:
+            print("Loading SVHN as unknown data...")
             self.unknown_train_dataset = SVHNUnknownDataset(
-                data_root=data_root,
+                data_root=self.data_root,
                 split="train",
                 transform=self.svhn_train_transform
             )
             
             self.unknown_test_dataset = SVHNUnknownDataset(
-                data_root=data_root,
+                data_root=self.data_root,
                 split="test",
                 transform=self.svhn_test_transform
             )
         
-        # Create task splits
-        self.task_classes = self._create_task_splits()
-        self.current_task = 0
+        self.datasets_loaded = True
+        print("Datasets loaded successfully")
         
     def _create_task_splits(self) -> List[List[int]]:
         """Split 100 classes into tasks"""
@@ -238,6 +261,9 @@ class EnhancedContinualCIFAR100:
     ) -> Dataset:
         """Get dataset for a specific task with optional unknown samples"""
         
+        # Load datasets if not already loaded
+        self._load_datasets_if_needed()
+        
         if task_id >= self.num_tasks:
             raise ValueError(f"Task {task_id} out of range")
         
@@ -261,7 +287,6 @@ class EnhancedContinualCIFAR100:
         
         # Mix with unknown data if requested
         if include_unknown and self.use_unknown_data and unknown_dataset is not None:
-            print("Including unknown data with ratio:", self.get_task_unknown_ratio(task_id))
             unknown_ratio = self.get_task_unknown_ratio(task_id)
             return MixedTaskDataset(
                 task_dataset=task_dataset,
@@ -317,6 +342,7 @@ class EnhancedContinualCIFAR100:
             if isinstance(batch[0], tuple) and len(batch[0]) == 3:
                 # Mixed dataset with unknown indicator
                 images, labels, unknown_flags = zip(*batch)
+                # Don't move to GPU here - let training loop handle it
                 return (
                     torch.stack(images),
                     torch.tensor(labels, dtype=torch.long),
@@ -327,13 +353,15 @@ class EnhancedContinualCIFAR100:
                 images, labels = zip(*batch)
                 return torch.stack(images), torch.tensor(labels, dtype=torch.long)
         
-        # Create loaders
+        # Create loaders with memory-efficient settings
         train_loader = DataLoader(
             train_dataset,
             batch_size=batch_size,
             shuffle=True,
             num_workers=num_workers,
-            pin_memory=False,
+            pin_memory=False,  # Don't pin memory for efficiency
+            prefetch_factor=2 if num_workers > 0 else None,
+            persistent_workers=False,  # Don't keep workers alive
             collate_fn=collate_fn if include_unknown_train and self.use_unknown_data else None
         )
         
@@ -343,6 +371,8 @@ class EnhancedContinualCIFAR100:
             shuffle=False,
             num_workers=num_workers,
             pin_memory=False,
+            prefetch_factor=2 if num_workers > 0 else None,
+            persistent_workers=False,
             collate_fn=collate_fn if include_unknown_train and self.use_unknown_data else None
         )
         
@@ -352,10 +382,27 @@ class EnhancedContinualCIFAR100:
             shuffle=False,
             num_workers=num_workers,
             pin_memory=False,
+            prefetch_factor=2 if num_workers > 0 else None,
+            persistent_workers=False,
             collate_fn=collate_fn if include_unknown_test and self.use_unknown_data else None
         )
         
         return train_loader, val_loader, test_loader
+    
+    def clear_cache(self):
+        """Clear dataset cache to free memory"""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
+    def unload_datasets(self):
+        """Unload datasets from memory when not needed"""
+        self.train_dataset = None
+        self.test_dataset = None
+        self.unknown_train_dataset = None
+        self.unknown_test_dataset = None
+        self.datasets_loaded = False
+        self.clear_cache()
+        print("Datasets unloaded from memory")
     
     def get_statistics(self, task_id: int) -> Dict:
         """Get statistics about the dataset composition for a task"""
@@ -370,6 +417,8 @@ class EnhancedContinualCIFAR100:
         }
         
         if self.use_unknown_data:
+            # Load datasets temporarily if needed
+            self._load_datasets_if_needed()
             task_train = self.get_task_dataset(task_id, "train", include_unknown=False)
             stats['task_samples'] = len(task_train)
             stats['expected_unknown_samples'] = int(len(task_train) * unknown_ratio / (1 - unknown_ratio))
@@ -381,6 +430,7 @@ class TaskDataset(Dataset):
     """
     Wrapper dataset for a specific task.
     Filters and remaps labels for task-specific training.
+    Memory-efficient version that doesn't cache all data.
     """
     
     def __init__(
@@ -400,13 +450,14 @@ class TaskDataset(Dataset):
                 for new_label, orig_class in enumerate(task_classes)
             }
         
-        # Filter indices for this task
+        # Filter indices for this task (just store indices, not data)
         self.indices = []
         if hasattr(base_dataset, 'targets'):
             for idx, label in enumerate(base_dataset.targets):
                 if label in task_classes:
                     self.indices.append(idx)
         else:
+            # Slower but more memory efficient
             for idx in range(len(base_dataset)):
                 _, label = base_dataset[idx]
                 if label in task_classes:
@@ -422,4 +473,5 @@ class TaskDataset(Dataset):
         if self.remap_labels:
             label = self.label_map[label]
         
+        # Data remains on CPU until moved by DataLoader
         return image, label

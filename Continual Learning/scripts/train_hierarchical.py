@@ -306,7 +306,10 @@ def create_trainer(model, memory_buffer, args):
     return trainer
 
 def run_training(args, model, dataset, trainer, memory_buffer, logger):
-    """Main training loop with unknown data handling and buffer management"""
+    """
+    Main training loop with unknown data handling and buffer management
+    Modified for memory efficiency - clears cache between tasks
+    """
     
     # Visualization setup
     visualizer = None
@@ -336,11 +339,17 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         print(f"TASK {task_idx + 1}/{args.num_tasks}: {task_id}")
         print(f"{'='*60}")
         
+        # Clear GPU cache before each task
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        
         # Get data loaders with unknown data if enabled
+        # Use fewer workers and no pin_memory for efficiency
         train_loader, val_loader, test_loader = dataset.get_task_loaders(
             task_idx,
             batch_size=args.batch_size,
-            num_workers=args.num_workers,
+            num_workers=min(args.num_workers, 2),  # Limit workers for memory
             include_unknown_train=args.use_unknown_data,
             include_unknown_test=args.include_unknown_test
         )
@@ -361,7 +370,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         if args.use_hierarchical and hasattr(model, 'set_memory_buffer'):
             model.set_memory_buffer(memory_buffer)
         
-        # Train on current task
+        # Train on current task (trainer already has memory-efficient implementation)
         print(f"Training on {task_id}...")
         best_acc = trainer.train_task(
             task_id=task_id,
@@ -381,15 +390,18 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         
         # UPDATE MEMORY BUFFER with current task data
         if memory_buffer is not None:
-            if memory_buffer is not None:
-                update_memory_buffer_efficient(
-                    model, 
-                    memory_buffer, 
-                    train_loader, 
-                    task_id, 
-                    args,
-                    num_batches=5
-                )
+            update_memory_buffer_efficient(
+                model, 
+                memory_buffer, 
+                train_loader, 
+                task_id, 
+                args,
+                num_batches=3  # Reduced from 5 to 3 for memory
+            )
+        
+        # Clear cache after buffer update
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
                     
         # EVALUATE ON BUFFER after updating (skip first task)
         if memory_buffer is not None and task_idx > 0 and len(memory_buffer) > 0:
@@ -407,20 +419,33 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             for metric_name, value in unknown_metrics[task_idx].items():
                 print(f"  - {metric_name}: {value:.3f}")
         
-        # Evaluate on all tasks
+        # Evaluate on all tasks (one at a time to save memory)
         print(f"\nEvaluating on all {task_idx + 1} tasks...")
         test_loaders = {}
+        current_results = {}
+        
         for i in range(task_idx + 1):
+            # Get loader for single task
             _, _, test_loader_i = dataset.get_task_loaders(
                 i,
                 batch_size=args.batch_size,
-                num_workers=args.num_workers,
+                num_workers=min(args.num_workers, 2),
                 include_unknown_train=False,
                 include_unknown_test=args.include_unknown_test
             )
-            test_loaders[f"task_{i}"] = test_loader_i
+            task_i_id = f"task_{i}"
+            test_loaders[task_i_id] = test_loader_i
+            
+            # Evaluate immediately and store result
+            with torch.no_grad():
+                acc = trainer.evaluate_task(test_loader_i, task_i_id)
+                current_results[task_i_id] = acc
+            
+            # Clear loader from memory
+            del test_loader_i
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
-        current_results = trainer.evaluate_all_tasks(test_loaders)
         task_accuracies[task_idx] = current_results
         
         # Save checkpoint state
@@ -448,27 +473,37 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             print(f"  - Total tasks: {stats['total_tasks']}")
             print(f"  - Merge attempts: {stats['merge_attempts']}")
             print(f"  - Successful merges: {stats['successful_merges']}")
+        
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # Final evaluation
     print(f"\n{'='*60}")
     print("FINAL EVALUATION ON ALL TASKS")
     print(f"{'='*60}")
     
-    all_test_loaders = {}
+    # Evaluate one task at a time for memory efficiency
+    final_results = {}
     for i in range(args.num_tasks):
         _, _, test_loader = dataset.get_task_loaders(
             i,
             batch_size=args.batch_size,
-            num_workers=args.num_workers,
+            num_workers=min(args.num_workers, 2),
             include_unknown_train=False,
             include_unknown_test=args.include_unknown_test
         )
-        all_test_loaders[f"task_{i}"] = test_loader
-    
-    if args.use_hierarchical:
-        final_results = trainer.evaluate_hierarchical(all_test_loaders) if hasattr(trainer, 'evaluate_hierarchical') else trainer.evaluate_all_tasks(all_test_loaders)
-    else:
-        final_results = trainer.evaluate_all_tasks(all_test_loaders)
+        task_i_id = f"task_{i}"
+        
+        with torch.no_grad():
+            if args.use_hierarchical and hasattr(trainer, 'evaluate_hierarchical'):
+                acc = trainer.evaluate_hierarchical({task_i_id: test_loader})[task_i_id]
+            else:
+                acc = trainer.evaluate_task(test_loader, task_i_id)
+            final_results[task_i_id] = acc
+        
+        del test_loader
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
     # Get comprehensive metrics
     final_metrics = trainer.get_metrics_summary()
@@ -496,6 +531,10 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             visualizer, model, trainer,
             args, unknown_metrics
         )
+    
+    # Final cleanup
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     
     return results
 
@@ -873,6 +912,7 @@ def main(args=None):
 def update_memory_buffer_efficient(model, memory_buffer, train_loader, task_id, args, num_batches=5):
     """
     Memory-efficient buffer update - processes data in small chunks
+    Modified to use even smaller micro-batches and immediate CPU transfer
     """
     if memory_buffer is None:
         return
@@ -886,6 +926,10 @@ def update_memory_buffer_efficient(model, memory_buffer, train_loader, task_id, 
     
     model.eval()
     device = next(model.parameters()).device
+    
+    # Clear cache before starting
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     
     with torch.no_grad():
         for batch_idx, batch_data in enumerate(train_loader):
@@ -907,22 +951,23 @@ def update_memory_buffer_efficient(model, memory_buffer, train_loader, task_id, 
             all_images.append(images)
             all_labels.append(labels)
             
-            # Extract features if needed (process in small chunks)
+            # Extract features if needed (process in smaller chunks)
             if args.selection_strategy == 'herding':
-                chunk_size = 16  # Small chunk to avoid OOM
+                chunk_size = 8  # Reduced from 16 to 8 for less memory usage
                 batch_features = []
                 
                 for i in range(0, len(images), chunk_size):
-                    chunk = images[i:i+chunk_size].to(device)
+                    chunk = images[i:i+chunk_size].to(device, non_blocking=True)
                     feat = model.forward(chunk, task_id=task_id, return_features=True)
                     if isinstance(feat, dict):
                         feat = feat.get('features', feat)
                     batch_features.append(feat.cpu())
+                    # Immediate cleanup
                     del chunk, feat
                     
                 all_features.append(torch.cat(batch_features, dim=0))
             
-            # Clear any GPU cache
+            # Clear GPU cache after each batch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
     
@@ -945,6 +990,10 @@ def update_memory_buffer_efficient(model, memory_buffer, train_loader, task_id, 
         print(f"  ✓ Buffer updated:")
         print(f"    - Added {len(final_images)} samples")
         print(f"    - Total: {stats['total_samples']}/{memory_buffer.buffer_size}")
+    
+    # Final cache clear
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     main()
