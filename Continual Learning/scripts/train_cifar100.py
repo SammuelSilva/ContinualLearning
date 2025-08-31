@@ -436,7 +436,7 @@ def main():
             _, _, test_loader_i = dataset.get_task_loaders(i, batch_size=args.batch_size)
             test_loaders[f"task_{i}"] = test_loader_i
         
-        current_results = trainer.evaluate_all_tasks(test_loaders)
+        current_results = trainer.evaluate_task(test_loaders)
         task_accuracies[task_idx] = current_results
         
         # Calculate forgetting
@@ -458,7 +458,7 @@ def main():
         _, _, test_loader = dataset.get_task_loaders(i, batch_size=args.batch_size)
         all_test_loaders[f"task_{i}"] = test_loader
     
-    final_results = trainer.evaluate_all_tasks(all_test_loaders)
+    final_results = trainer.evaluate_task(all_test_loaders)
 
     # Get comprehensive metrics from tracker
     final_metrics = trainer.get_metrics_summary()

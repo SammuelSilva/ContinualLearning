@@ -201,7 +201,7 @@ def create_model(args) -> torch.nn.Module:
     """Create model based on arguments"""
     
     if args.use_hierarchical:
-        print("🚀 Creating Hierarchical LoRA-ViT with Intelligent TIES Merging")
+        print("🚀 Creating Hierarchical LoRA-ViT with Gradient Checkpointing")
         
         from src.models.merge_strategies import MergeConfig
         merge_config = MergeConfig(
@@ -222,7 +222,9 @@ def create_model(args) -> torch.nn.Module:
             use_pretrained=True,
             max_tasks_per_block=args.max_tasks_per_block,
             min_tasks_to_merge=args.min_tasks_to_merge,
-            merge_config=merge_config
+            merge_config=merge_config,
+            gradient_checkpointing=True,
+            checkpoint_segments=4
         )
 
         print(f"  - Tasks per block: {args.max_tasks_per_block}")
@@ -447,7 +449,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             
             # Evaluate immediately and store result
             with torch.no_grad():
-                acc = trainer.evaluate_all_tasks(test_loader_i, task_i_id)
+                acc = trainer.evaluate_task(test_loader_i, task_i_id)
                 current_results[task_i_id] = acc
             
             # MEMORY MANAGEMENT: Clear loader from memory
@@ -518,7 +520,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             if args.use_hierarchical and hasattr(trainer, 'evaluate_hierarchical'):
                 acc = trainer.evaluate_hierarchical({task_i_id: test_loader})[task_i_id]
             else:
-                acc = trainer.evaluate_all_tasks(test_loader, task_i_id)
+                acc = trainer.evaluate_task(test_loader, task_i_id)
             final_results[task_i_id] = acc
         
         # MEMORY MANAGEMENT: Clear after each evaluation

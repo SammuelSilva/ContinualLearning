@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple
 import timm
+from torch.utils.checkpoint import checkpoint
 from timm.models.vision_transformer import VisionTransformer, Attention, Mlp
 from functools import partial
 from src.models.lora_layers import LoRALayer, TaskSpecificLoRA
@@ -152,6 +153,8 @@ class ContinualLoRAViT(nn.Module):
         lora_dropout: float = 0.1,
         lora_config: str = "attention_only",
         use_pretrained: bool = True,
+        gradient_checkpointing: bool = True,
+        checkpoint_segments: int = 4
     ):
         super().__init__()
         
@@ -161,7 +164,13 @@ class ContinualLoRAViT(nn.Module):
             pretrained=use_pretrained,
             num_classes=0  # Remove classification head
         )
+
+        self.gradient_checkpointing = gradient_checkpointing
+        self.checkpoint_segments = checkpoint_segments
         
+        if hasattr(self.backbone, 'set_grad_checkpointing'):
+            self.backbone.set_grad_checkpointing(gradient_checkpointing)
+
         # Freeze backbone parameters
         for param in self.backbone.parameters():
             param.requires_grad = False
@@ -324,11 +333,72 @@ class ContinualLoRAViT(nn.Module):
             self._inject_lora_modules(task_id)
             self.current_task = task_id
         
-        # Now forward pass will use LoRA-enhanced modules
-        features = self.backbone(x)
+        # Forward with gradient checkpointing
+        if self.training and self.gradient_checkpointing:
+            features = self._forward_with_checkpointing(x)
+        else:
+            # Normal forward for inference
+            features = self.backbone(x)
         
         return features
     
+    def _forward_with_checkpointing(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass with gradient checkpointing to save memory
+        """
+        # Initial embedding
+        x = self.backbone.patch_embed(x)
+        
+        # Add class token if the model expects it
+        if hasattr(self.backbone, 'cls_token'):
+            cls_token = self.backbone.cls_token.expand(x.shape[0], -1, -1)
+            x = torch.cat((cls_token, x), dim=1)
+        
+        # Position embeddings
+        if hasattr(self.backbone, 'pos_drop'):
+            x = self.backbone.pos_drop(x + self.backbone.pos_embed)
+        
+        # Process transformer blocks with checkpointing
+        blocks = self.backbone.blocks
+        num_blocks = len(blocks)
+        
+        if self.checkpoint_segments > 0:
+            # Divide blocks into segments for checkpointing
+            segment_size = num_blocks // self.checkpoint_segments
+            
+            for i in range(0, num_blocks, segment_size):
+                # Get segment of blocks
+                segment_end = min(i + segment_size, num_blocks)
+                segment_blocks = blocks[i:segment_end]
+                
+                # Checkpoint this segment
+                def run_segment(x, blocks):
+                    for block in blocks:
+                        x = block(x)
+                    return x
+                
+                # Use gradient checkpointing for this segment
+                x = checkpoint(run_segment, x, segment_blocks, use_reentrant=False)
+        else:
+            # Checkpoint each block individually (more memory efficient but slower)
+            for block in blocks:
+                x = checkpoint(block, x, use_reentrant=False)
+        
+        # Final norm
+        x = self.backbone.norm(x)
+        
+        # Extract class token or pool
+        if hasattr(self.backbone, 'cls_token'):
+            features = x[:, 0]
+        else:
+            features = x.mean(dim=1)
+        
+        # Apply head if exists
+        if hasattr(self.backbone, 'head') and self.backbone.head is not None:
+            features = self.backbone.head(features)
+        
+        return features
+
     def forward(
         self,
         x: torch.Tensor,

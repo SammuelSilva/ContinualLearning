@@ -96,10 +96,15 @@ class HierarchicalTrainer:
         
         for epoch in range(num_epochs + (warmup_epochs if task_idx == 0 else 0)):
             # Training phase
+            if hasattr(self.model, 'set_gradient_checkpointing'):
+                self.model.set_gradient_checkpointing(True)
+
             train_loss, train_metrics = self._train_epoch(
                 task_id, train_loader, optimizer, scheduler, task_idx, epoch
             )
             
+            if hasattr(self.model, 'set_gradient_checkpointing'):
+                self.model.set_gradient_checkpointing(False)
             # Validation phase
             val_loss, val_metrics = self._validate(task_id, val_loader, task_idx)
             
@@ -295,6 +300,63 @@ class HierarchicalTrainer:
         
         return total_loss / len(train_loader), metrics
     
+    def evaluate_task(self, test_loader, task_id: str) -> float:
+        """
+        Replace existing evaluate_task with memory-efficient version
+        """
+        self.model.eval()
+        
+        # Disable gradient checkpointing for evaluation (faster)
+        if hasattr(self.model, 'set_gradient_checkpointing'):
+            original_state = self.model.gradient_checkpointing
+            self.model.set_gradient_checkpointing(False)
+        
+        correct = 0
+        total = 0
+        max_batch_size = 32  # Process in smaller chunks if needed
+        
+        with torch.no_grad():
+            for batch_data in test_loader:
+                if len(batch_data) == 3:
+                    images, labels, _ = batch_data
+                else:
+                    images, labels = batch_data
+                
+                batch_size = images.size(0)
+                
+                # Process in sub-batches to save memory
+                for i in range(0, batch_size, max_batch_size):
+                    end_idx = min(i + max_batch_size, batch_size)
+                    sub_images = images[i:end_idx].to(self.device, non_blocking=True)
+                    sub_labels = labels[i:end_idx].to(self.device, non_blocking=True)
+                    
+                    # Forward pass
+                    outputs = self.model(sub_images, task_id=task_id)
+                    
+                    # Handle output format
+                    if isinstance(outputs, torch.Tensor):
+                        logits = outputs
+                    else:
+                        logits = outputs['logits']
+                    
+                    # Remove unknown class for accuracy calculation
+                    if logits.size(1) > self.model.task_classes[task_id]:
+                        logits = logits[:, :-1]
+                    
+                    _, predicted = logits.max(1)
+                    correct += predicted.eq(sub_labels).sum().item()
+                    total += sub_labels.size(0)
+                    
+                    # Clear intermediate tensors
+                    del sub_images, sub_labels, logits
+        
+        # Restore gradient checkpointing state
+        if hasattr(self.model, 'set_gradient_checkpointing'):
+            self.model.set_gradient_checkpointing(original_state)
+        
+        accuracy = 100. * correct / total
+        return accuracy
+
     def _compute_loss(
         self,
         outputs: Dict[str, torch.Tensor],
@@ -432,14 +494,14 @@ class HierarchicalTrainer:
         unknown_fn = 0
         
         # Determine device
-        if use_cpu:
-            device = torch.device('cpu')
-            # Move model to CPU temporarily
-            original_device = next(self.model.parameters()).device
-            self.model.cpu()
-        else:
-            device = self.device
-            original_device = device
+        #if use_cpu:
+        #    device = torch.device('cpu')
+        #    # Move model to CPU temporarily
+        #    original_device = next(self.model.parameters()).device
+        #    self.model.cpu()
+        #else:
+        device = self.device
+        original_device = device
         
         with torch.no_grad():
             for batch_data in val_loader:
