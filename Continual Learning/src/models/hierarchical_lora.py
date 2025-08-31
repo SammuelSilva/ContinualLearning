@@ -258,6 +258,56 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
             features = cls_output
         
         return features
+    
+    def _get_features_cpu(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Extract features on CPU to save GPU memory
+        Used for validation and buffer operations
+        """
+        # Move model to CPU temporarily if needed
+        original_device = next(self.parameters()).device
+        
+        if original_device.type == 'cuda':
+            self.cpu()
+            images = images.cpu()
+        
+        # Extract features on CPU
+        with torch.no_grad():
+            x = self.backbone.patch_embed(images)
+            
+            # Add class token if the model expects it
+            if hasattr(self.backbone, 'cls_token'):
+                cls_token = self.backbone.cls_token.expand(x.shape[0], -1, -1)
+                x = torch.cat((cls_token, x), dim=1)
+                
+            # Position embeddings
+            if hasattr(self.backbone, 'pos_drop'):
+                x = self.backbone.pos_drop(x + self.backbone.pos_embed)
+            
+            # Transformer blocks (no checkpointing for inference)
+            for block in self.backbone.blocks:
+                x = block(x)
+            
+            x = self.backbone.norm(x)
+            
+            # Extract class token (first token) for classification
+            if hasattr(self.backbone, 'cls_token'):
+                cls_output = x[:, 0]
+            else:
+                cls_output = x.mean(dim=1)
+            
+            # Apply backbone head if it exists
+            if hasattr(self.backbone, 'head') and self.backbone.head is not None:
+                features = self.backbone.head(cls_output)
+            else:
+                features = cls_output
+        
+        # Move model back to original device if needed
+        if original_device.type == 'cuda':
+            self.to(original_device)
+            # Keep features on CPU
+        
+        return features  # Returns CPU tensor
 
     def forward(self, x: torch.Tensor, task_id: Optional[str] = None, 
                 return_features: bool = False) -> torch.Tensor:
@@ -296,39 +346,50 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
         
         return features
     
-    def predict_task_id(self, x: torch.Tensor, unknown_threshold: float = 0.5) -> Tuple[List[str], List[float]]:
+    def predict_task_id(self, x: torch.Tensor, unknown_threshold: float = 0.5, use_cpu: bool = True) -> Tuple[List[str], List[float]]:
         """
-        More conservative version - requires high confidence to accept a sample
+        Modified version with CPU option for memory efficiency
         """
         self.eval()
         batch_size = x.size(0)
         
         with torch.no_grad():
-            features = self._get_features(x)
+            # Get features on CPU if requested
+            if use_cpu:
+                features = self._get_features_cpu(x.cpu())
+            else:
+                features = self._get_features(x)
             
             head_scores = {}
             
-            # Get scores from all heads
+            # Process heads on CPU
             for task_id in self.specialist_tasks:
                 if task_id in self.task_heads:
-                    logits = self.task_heads[task_id](features)
+                    # Move head to CPU temporarily
+                    head = self.task_heads[task_id]
+                    original_device = next(head.parameters()).device
+                    
+                    if use_cpu and original_device.type == 'cuda':
+                        head.cpu()
+                    
+                    # Compute logits on CPU
+                    logits = head(features)
                     probs = F.softmax(logits, dim=1)
                     
-                    # Score = confidence in accepting the sample
-                    # = max class probability * (1 - unknown probability)
+                    # Score calculation
                     class_probs = probs[:, :-1]
                     unknown_prob = probs[:, -1]
                     max_class_prob = torch.max(class_probs, dim=1)[0]
-                    
-                    # Combined score: high class confidence AND low unknown probability
                     acceptance_score = max_class_prob * (1.0 - unknown_prob)
                     head_scores[task_id] = acceptance_score
+                    
+                    # Move head back if needed
+                    if use_cpu and original_device.type == 'cuda':
+                        head.to(original_device)
             
             # Route based on highest acceptance score
             predicted_tasks = []
             confidences = []
-            
-            all_tasks = list(head_scores.keys())
             
             for i in range(batch_size):
                 best_task = None
@@ -339,12 +400,6 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                     if score > best_score:
                         best_score = score
                         best_task = task_id
-                
-                # If no head is confident enough, route to most recent
-                #if best_score < (1.0 - unknown_threshold):
-                #    print(f"Sample {i}: Low confidence (best: {best_score:.3f}, {best_task}), routing to fallback")
-                #    best_task = all_tasks[-1]  # Most recent task
-                #    best_score = 0.1  # Low confidence indicator
                 
                 predicted_tasks.append(best_task)
                 confidences.append(best_score)

@@ -61,7 +61,10 @@ def parse_args():
     parser.add_argument('--lora_config', type=str, default='attention_only',
                        choices=['attention_only', 'ffn_only', 'both'],
                        help='LoRA placement configuration')
-    
+    parser.add_argument('--cpu_validation', action='store_true', default=True,
+                        help='Run validation on CPU to save GPU memory')
+    parser.add_argument('--cpu_buffer_update', action='store_true', default=True,
+                        help='Update memory buffer using CPU features')
     # Hierarchical arguments
     parser.add_argument('--use_hierarchical', action='store_true',
                        help='Use hierarchical architecture with block merging')
@@ -930,10 +933,9 @@ def main(args=None):
     
     return results
 
-def update_memory_buffer_efficient(model, memory_buffer, train_loader, task_id, args, num_batches=5):
+def update_memory_buffer_efficient(model, memory_buffer, train_loader, task_id, args, num_batches=3):
     """
-    Memory-efficient buffer update - processes data in small chunks
-    Modified to use even smaller micro-batches and immediate CPU transfer
+    Memory-efficient buffer update - processes data on CPU
     """
     if memory_buffer is None:
         return
@@ -946,11 +948,11 @@ def update_memory_buffer_efficient(model, memory_buffer, train_loader, task_id, 
     all_features = [] if args.selection_strategy == 'herding' else None
     
     model.eval()
-    device = next(model.parameters()).device
     
-    # Clear cache before starting
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    # Process on CPU for memory efficiency
+    original_device = next(model.parameters()).device
+    if args.selection_strategy == 'herding':
+        model.cpu()  # Move model to CPU for feature extraction
     
     with torch.no_grad():
         for batch_idx, batch_data in enumerate(train_loader):
@@ -972,25 +974,24 @@ def update_memory_buffer_efficient(model, memory_buffer, train_loader, task_id, 
             all_images.append(images)
             all_labels.append(labels)
             
-            # Extract features if needed (process in smaller chunks)
+            # Extract features on CPU if needed
             if args.selection_strategy == 'herding':
-                chunk_size = 8  # Reduced from 16 to 8 for less memory usage
+                # Process in small chunks on CPU
+                chunk_size = 16
                 batch_features = []
                 
                 for i in range(0, len(images), chunk_size):
-                    chunk = images[i:i+chunk_size].to(device, non_blocking=True)
+                    chunk = images[i:i+chunk_size]  # Keep on CPU
                     feat = model.forward(chunk, task_id=task_id, return_features=True)
                     if isinstance(feat, dict):
                         feat = feat.get('features', feat)
-                    batch_features.append(feat.cpu())
-                    # Immediate cleanup
-                    del chunk, feat
+                    batch_features.append(feat)  # Already on CPU
                     
                 all_features.append(torch.cat(batch_features, dim=0))
-            
-            # Clear GPU cache after each batch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+    
+    # Move model back to original device
+    if args.selection_strategy == 'herding' and original_device.type == 'cuda':
+        model.to(original_device)
     
     # Concatenate all CPU tensors
     if all_images:
@@ -1012,7 +1013,7 @@ def update_memory_buffer_efficient(model, memory_buffer, train_loader, task_id, 
         print(f"    - Added {len(final_images)} samples")
         print(f"    - Total: {stats['total_samples']}/{memory_buffer.buffer_size}")
     
-    # Final cache clear
+    # Clear cache
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 

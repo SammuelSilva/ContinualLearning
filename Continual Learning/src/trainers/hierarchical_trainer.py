@@ -415,9 +415,12 @@ class HierarchicalTrainer:
         self,
         task_id: str,
         val_loader: torch.utils.data.DataLoader,
-        task_idx: int
+        task_idx: int,
+        use_cpu: bool = True  # New parameter
     ) -> Tuple[float, Dict]:
-        """Validate on a specific task"""
+        """
+        Modified validation to optionally use CPU for memory efficiency
+        """
         
         self.model.eval()
         total_loss = 0
@@ -428,41 +431,46 @@ class HierarchicalTrainer:
         unknown_tn = 0
         unknown_fn = 0
         
+        # Determine device
+        if use_cpu:
+            device = torch.device('cpu')
+            # Move model to CPU temporarily
+            original_device = next(self.model.parameters()).device
+            self.model.cpu()
+        else:
+            device = self.device
+            original_device = device
+        
         with torch.no_grad():
             for batch_data in val_loader:
                 # Handle different batch formats
                 if len(batch_data) == 3:
                     images, labels, unknown_flags = batch_data
-                    images = images.to(self.device)
-                    labels = labels.to(self.device)
-                    unknown_flags = unknown_flags.to(self.device).float()
+                    images = images.to(device)
+                    labels = labels.to(device)
+                    unknown_flags = unknown_flags.to(device).float()
                     has_unknown = True
                 else:
                     images, labels = batch_data
-                    images = images.to(self.device)
-                    labels = labels.to(self.device)
-                    unknown_flags = torch.zeros_like(labels, dtype=torch.float)
-                    has_unknown = True
+                    images = images.to(device)
+                    labels = labels.to(device)
+                    unknown_flags = torch.zeros_like(labels, dtype=torch.float, device=device)
+                    has_unknown = False
                 
                 outputs = self.model(images, task_id=task_id)
                 
-                # Handle case where model returns tensor directly instead of dict
+                # Handle output format
                 if isinstance(outputs, torch.Tensor):
-                    # Model returned logits directly, wrap in expected format
                     logits = outputs
                     outputs = {'logits': logits}
                 elif isinstance(outputs, dict):
-                    # Model returned dictionary as expected
                     if 'logits' not in outputs:
                         raise ValueError("Model output dictionary must contain 'logits' key")
                     logits = outputs['logits']
                 else:
                     raise ValueError(f"Expected model output to be torch.Tensor or dict, got {type(outputs)}")
                 
-                if logits.dim() != 2:
-                    raise ValueError(f"Expected logits to be 2D tensor, got shape {logits.shape}")
-                
-                # Compute loss
+                # Compute loss on CPU
                 loss, _ = self._compute_loss(
                     outputs, labels, unknown_flags, task_id, task_idx, has_unknown
                 )
@@ -501,6 +509,10 @@ class HierarchicalTrainer:
                     _, predicted = logits.max(1)
                     correct += predicted.eq(labels).sum().item()
                     total += labels.size(0)
+        
+        # Move model back to original device
+        if use_cpu and original_device.type == 'cuda':
+            self.model.to(original_device)
         
         accuracy = 100. * correct / total if total > 0 else 0
         
