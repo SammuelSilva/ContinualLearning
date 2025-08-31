@@ -447,7 +447,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             
             # Evaluate immediately and store result
             with torch.no_grad():
-                acc = trainer.evaluate_task(test_loader_i, task_i_id)
+                acc = trainer.evaluate_all_tasks(test_loader_i, task_i_id)
                 current_results[task_i_id] = acc
             
             # MEMORY MANAGEMENT: Clear loader from memory
@@ -518,7 +518,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             if args.use_hierarchical and hasattr(trainer, 'evaluate_hierarchical'):
                 acc = trainer.evaluate_hierarchical({task_i_id: test_loader})[task_i_id]
             else:
-                acc = trainer.evaluate_task(test_loader, task_i_id)
+                acc = trainer.evaluate_all_tasks(test_loader, task_i_id)
             final_results[task_i_id] = acc
         
         # MEMORY MANAGEMENT: Clear after each evaluation
