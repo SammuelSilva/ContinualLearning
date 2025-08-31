@@ -536,7 +536,7 @@ def create_visualizations(visualizer, model, trainer, task_idx, args, unknown_me
         )
     
     # Plot metrics evolution
-    trainer.plot_metrics(save_dir)
+    trainer.metrics.plot_metrics(save_dir, "metrics_evolution.png")
 
 
 def create_final_visualizations(visualizer, model, trainer, args, unknown_metrics=None):
@@ -943,6 +943,6 @@ def update_memory_buffer_efficient(model, memory_buffer, train_loader, task_id, 
         print(f"  ✓ Buffer updated:")
         print(f"    - Added {len(final_images)} samples")
         print(f"    - Total: {stats['total_samples']}/{memory_buffer.buffer_size}")
-        
+
 if __name__ == "__main__":
     main()
