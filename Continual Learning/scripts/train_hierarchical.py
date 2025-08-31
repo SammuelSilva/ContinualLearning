@@ -536,7 +536,9 @@ def create_visualizations(visualizer, model, trainer, task_idx, args, unknown_me
         )
     
     # Plot metrics evolution
-    trainer.metrics.plot_metrics(save_dir, "metrics_evolution.png")
+    trainer.metrics.plot_metrics_evolution(
+        save_path=os.path.join(save_dir, f'metrics_evolution_({task_idx+1}).png')
+    )
 
 
 def create_final_visualizations(visualizer, model, trainer, args, unknown_metrics=None):
