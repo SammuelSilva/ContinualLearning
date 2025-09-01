@@ -313,6 +313,7 @@ class HierarchicalTrainer:
         
         correct = 0
         total = 0
+        predicted_lenght = 0
         max_batch_size = 32  # Process in smaller chunks if needed
         
         with torch.no_grad():
@@ -346,7 +347,7 @@ class HierarchicalTrainer:
                     _, predicted = logits.max(1)
                     correct += predicted.eq(sub_labels).sum().item()
                     total += sub_labels.size(0)
-                    
+                    predicted_lenght += len(predicted)
                     # Clear intermediate tensors
                     del sub_images, sub_labels, logits
         
@@ -355,7 +356,7 @@ class HierarchicalTrainer:
             self.model.set_gradient_checkpointing(original_state)
         
         accuracy = 100. * correct / total
-        precision = 100 * correct/(len(predicted))
+        precision = 100 * correct/predicted_lenght
         return accuracy, precision
 
     def _compute_loss(

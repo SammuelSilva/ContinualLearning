@@ -398,7 +398,7 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                     class_probs = probs[:, :-1]
                     unknown_prob = probs[:, -1]
                     max_class_prob = torch.max(class_probs, dim=1)[0]
-                    acceptance_score = max_class_prob * (1.0 - unknown_prob)
+                    acceptance_score = (1.0 - unknown_prob) #max_class_prob * 
                     head_scores[task_id] = acceptance_score
                     
                     # Move head back if needed
