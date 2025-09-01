@@ -101,7 +101,7 @@ def parse_args():
     # Unknown data arguments
     parser.add_argument('--use_unknown_data', action='store_true',
                        help='Use SVHN as unknown/OOD data for training')
-    parser.add_argument('--unknown_ratio', type=float, default=0.3,
+    parser.add_argument('--unknown_ratio', type=float, default=0.8,
                        help='Ratio of unknown samples to task samples (for task 0)')
     parser.add_argument('--unknown_ratio_decay', type=float, default=0.05,
                        help='Decay factor for unknown ratio across tasks')
