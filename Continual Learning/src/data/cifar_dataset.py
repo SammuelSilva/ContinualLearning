@@ -83,7 +83,7 @@ class MixedTaskDataset(Dataset):
         
         # Calculate dataset sizes
         self.task_size = len(task_dataset)
-        self.unknown_size = int(self.task_size * unknown_ratio / (1 - unknown_ratio))
+        self.unknown_size = int(self.task_size/num_classes_per_task)*2
         
         # Sample indices from unknown dataset (just indices, not data)
         self.unknown_indices = np.random.choice(
