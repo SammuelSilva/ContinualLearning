@@ -510,13 +510,12 @@ class EnhancedContinualCIFAR100:
             'task_id': task_id,
             'num_classes': self.classes_per_task,
             'task_classes': self.task_classes[task_id],
-            'unknown_ratio': unknown_ratio,
             'unknown_enabled': self.use_unknown_data
         }
         
         if self.use_unknown_data:
             task_train = self.get_task_dataset(task_id, "train", include_unknown=False)
             stats['task_samples'] = len(task_train)
-            stats['expected_unknown_samples'] = int(len(task_train) * unknown_ratio / (1 - unknown_ratio))
+            stats['expected_unknown_samples'] = int(len(task_train)/self.task_classes[task_id])*2
         
         return stats
