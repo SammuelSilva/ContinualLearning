@@ -366,7 +366,6 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         if args.use_unknown_data:
             stats = dataset.get_statistics(task_idx)
             print(f"Task {task_idx} dataset composition:")
-            print(f"  - Unknown ratio: {stats['unknown_ratio']:.2%}")
             print(f"  - Task samples: {stats.get('task_samples', 'N/A')}")
             print(f"  - Expected unknown samples: {stats.get('expected_unknown_samples', 'N/A')}")
         
