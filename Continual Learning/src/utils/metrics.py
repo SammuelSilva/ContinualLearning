@@ -344,13 +344,13 @@ class ContinualMetrics:
         summary = "=" * 50 + "\n"
         summary += "CONTINUAL LEARNING METRICS SUMMARY\n"
         summary += "=" * 50 + "\n"
-        summary += f"Average Accuracy:     {metrics['average_accuracy']:.2f}%\n"
-        summary += f"Average Forgetting:   {metrics['average_forgetting']:.2f}%\n"
-        summary += f"Max Forgetting:       {metrics['max_forgetting']:.2f}%\n"
-        summary += f"Backward Transfer:    {metrics['backward_transfer']:.2f}%\n"
-        summary += f"Forward Transfer:     {metrics['forward_transfer']:.2f}%\n"
-        summary += f"Plasticity:          {metrics['plasticity']:.2f}%\n"
-        summary += f"Stability:           {metrics['stability']:.2f}\n"
+        summary += f"Average Accuracy:     {metrics['average_accuracy']}%\n"
+        summary += f"Average Forgetting:   {metrics['average_forgetting']}%\n"
+        summary += f"Max Forgetting:       {metrics['max_forgetting']}%\n"
+        summary += f"Backward Transfer:    {metrics['backward_transfer']}%\n"
+        summary += f"Forward Transfer:     {metrics['forward_transfer']}%\n"
+        summary += f"Plasticity:          {metrics['plasticity']}%\n"
+        summary += f"Stability:           {metrics['stability']}\n"
         summary += "=" * 50
         
         return summary
