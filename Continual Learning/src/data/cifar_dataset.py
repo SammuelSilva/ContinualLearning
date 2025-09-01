@@ -516,6 +516,6 @@ class EnhancedContinualCIFAR100:
         if self.use_unknown_data:
             task_train = self.get_task_dataset(task_id, "train", include_unknown=False)
             stats['task_samples'] = len(task_train)
-            stats['expected_unknown_samples'] = int(len(task_train)/self.task_classes[task_id])*2
+            stats['expected_unknown_samples'] = int(len(task_train)/len(self.task_classes[task_id]))*2
         
         return stats
