@@ -403,9 +403,21 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
                 train_loader, 
                 task_id, 
                 args,
-                num_batches=3  # Reduced from 5 to 3 for memory
+                num_batches=5  # Reduced from 5 to 3 for memory
             )
-        
+
+        if task_idx > 0:
+            print(f"\n🔄 Starting OOD Alignment for {task_id}...")
+            ood_metrics = trainer.ood_alignment_phase(
+                task_id=task_id,
+                task_idx=task_idx,
+                batch_size=64
+            )
+            
+            if ood_metrics:
+                improvement = ood_metrics.get('final_accuracy', 0) - ood_metrics.get('initial_accuracy', 0)
+                print(f"OOD Alignment completed: {improvement:+.2f}% improvement in unknown detection")        
+
         # MEMORY MANAGEMENT: Clear cache after buffer update
         dataset.clear_cache()
         if torch.cuda.is_available():

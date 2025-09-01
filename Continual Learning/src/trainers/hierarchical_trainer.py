@@ -135,20 +135,7 @@ class HierarchicalTrainer:
                 if patience_counter >= patience and epoch > warmup_epochs:
                     print(f"Early stopping at epoch {epoch+1}")
                     break
-        
-        # OOD Alignment Phase (if enabled and not the first task)
-        if self.enable_ood_alignment and task_idx > 0:
-            print(f"\n🔄 Starting OOD Alignment for {task_id}...")
-            ood_metrics = self.ood_alignment_phase(
-                task_id=task_id,
-                task_idx=task_idx,
-                batch_size=64
-            )
-            
-            if ood_metrics:
-                improvement = ood_metrics.get('final_accuracy', 0) - ood_metrics.get('initial_accuracy', 0)
-                print(f"OOD Alignment completed: {improvement:+.2f}% improvement in unknown detection")
-        
+                
         return best_val_acc
     
     def _train_epoch(
@@ -288,7 +275,8 @@ class HierarchicalTrainer:
                 'loss': f'{loss.item():.4f}',
                 'acc': f'{100. * correct / total:.1f}%' if total > 0 else '0.0%',
                 'replay': replay_count,
-                'lr': f'{scheduler.get_last_lr()[0]:.2e}'
+                'lr': f'{scheduler.get_last_lr()[0]:.2e}',
+                'loss_comp': loss_components
             })
         
         # Calculate metrics
@@ -684,7 +672,7 @@ class HierarchicalTrainer:
             # Track routing accuracy per task
             routing_stats = {}
             task_accuracies = {}
-            
+            task_overall_accuracies = {}
             # Get unique tasks in buffer
             unique_tasks = list(set(task_ids_true))
             
@@ -697,22 +685,26 @@ class HierarchicalTrainer:
                 task_samples = images[task_mask]
                 task_labels = labels[task_mask]
                 task_predicted = [predicted_tasks[i] for i, m in enumerate(task_mask) if m]
-                
+                task_confidence = [confidences[i] for i, m in enumerate(task_mask) if m]
+
                 # Calculate routing accuracy for this task
                 correct_routing = sum(1 for pred in task_predicted if pred == src_task)
                 routing_accuracy = 100.0 * correct_routing / len(task_predicted)
                 
                 # Track where samples were misrouted
                 misrouted_to = {}
+                misrouted_conf = {}
                 for pred in task_predicted:
                     if pred != src_task:
                         misrouted_to[pred] = misrouted_to.get(pred, 0) + 1
+                        misrouted_conf[pred] = [task_confidence[task_predicted.index(pred)]]
                 
                 routing_stats[src_task] = {
                     'routing_accuracy': routing_accuracy,
                     'total_samples': len(task_predicted),
                     'correct_routing': correct_routing,
-                    'misrouted_to': misrouted_to
+                    'misrouted_to': misrouted_to,
+                    'misrouted_conf': misrouted_conf
                 }
                 
                 # Calculate classification accuracy for correctly routed samples
@@ -735,6 +727,22 @@ class HierarchicalTrainer:
                 else:
                     task_accuracies[src_task] = 0.0
             
+            # Calculate classification metrics overall
+            if correctly_routed_mask.sum() > 0:
+                logits = self.model(correct_samples, task_id=src_task)
+                if isinstance(logits, dict):
+                    logits = logits['logits']
+            
+                # Exclude unknown class for accuracy calculation
+                logits_known = logits[:, :-1]
+                _, predicted = logits_known.max(1)
+
+                correct_samples = task_samples[correctly_routed_mask]
+                task_acc = 100.0 * predicted.eq(correct_samples).sum().item() / len(task_labels)
+                task_overall_accuracies[src_task] = task_acc
+            else:
+                task_overall_accuracies[src_task] = 0.0
+
             # Calculate overall metrics
             total_samples = len(images)
             correct_routing_total = sum(1 for i, true_task in enumerate(task_ids_true) 
@@ -744,29 +752,30 @@ class HierarchicalTrainer:
             # Calculate overall accuracy (only on correctly routed samples)
             correct_predictions = 0
             total_evaluated = 0
-            
+            total_overall_evaluated = 0
             for i, (true_task, pred_task) in enumerate(zip(task_ids_true, predicted_tasks)):
+                # This sample was correctly routed
+                logits = self.model(images[i:i+1], task_id=true_task)
+                if isinstance(logits, dict):
+                    logits = logits['logits']
+                
+                logits_known = logits[:, :-1]
+                _, predicted = logits_known.max(1)
                 if true_task == pred_task:
-                    # This sample was correctly routed
-                    logits = self.model(images[i:i+1], task_id=true_task)
-                    if isinstance(logits, dict):
-                        logits = logits['logits']
-                    
-                    logits_known = logits[:, :-1]
-                    _, predicted = logits_known.max(1)
-                    
                     if predicted.item() == labels[i].item():
                         correct_predictions += 1
                     total_evaluated += 1
-            
-            overall_accuracy = 100.0 * correct_predictions / total_evaluated if total_evaluated > 0 else 0.0
-            
+                
+                total_overall_evaluated += 1
+
+            all_accuracy = 100.0 * correct_predictions / total_evaluated if total_evaluated > 0 else 0.0
+            overall_accuracy = 100.0 * correct_predictions / total_overall_evaluated if total_overall_evaluated > 0 else 0.0
             # Print results
             print(f"\nBuffer contains {total_samples} samples from {len(unique_tasks)} tasks")
             print(f"\n📊 OVERALL METRICS:")
             print(f"  • Overall Routing Accuracy: {overall_routing_acc:.2f}%")
+            print(f"  • Overall Classification On Correct Routed Accuracy: {all_accuracy:.2f}%")
             print(f"  • Overall Classification Accuracy: {overall_accuracy:.2f}%")
-            print(f"  • Routing Error Rate: {100.0 - overall_routing_acc:.2f}%")
             
             print(f"\n📈 PER-TASK ROUTING METRICS:")
             for task in sorted(routing_stats.keys()):
@@ -775,13 +784,19 @@ class HierarchicalTrainer:
                 print(f"    • Samples: {stats['total_samples']}")
                 print(f"    • Routing Accuracy: {stats['routing_accuracy']:.2f}%")
                 print(f"    • Classification Accuracy: {task_accuracies.get(task, 0.0):.2f}%")
+                print(f"    • Classification Accuracy Overall: {task_overall_accuracies.get(task, 0.0):.2f}%")
                 
                 if stats['misrouted_to']:
                     print(f"    • Misrouted to:")
                     for wrong_task, count in sorted(stats['misrouted_to'].items()):
                         percentage = 100.0 * count / stats['total_samples']
                         print(f"      - {wrong_task}: {count} samples ({percentage:.1f}%)")
-            
+
+                if stats['misrouted_conf']:
+                    print(f"    • Misrouted Confidence:")
+                    for wrong_task, conf in sorted(stats['misrouted_conf'].items()):
+                        print(f"      - {wrong_task}: {conf:.2f}")
+
             print(f"{'='*60}\n")
             
             # Store metrics for later analysis
@@ -793,14 +808,16 @@ class HierarchicalTrainer:
                 'overall_routing_acc': overall_routing_acc,
                 'overall_accuracy': overall_accuracy,
                 'per_task_stats': routing_stats,
-                'per_task_accuracy': task_accuracies
+                'per_task_accuracy': task_accuracies,
+                'per_task_confidence': task_overall_accuracies
             })
             
             return {
                 'overall_routing_accuracy': overall_routing_acc,
                 'overall_accuracy': overall_accuracy,
                 'routing_stats': routing_stats,
-                'task_accuracies': task_accuracies
+                'task_accuracies': task_accuracies,
+                'task_confidences': task_overall_accuracies
             }
 
     def ood_alignment_phase(
