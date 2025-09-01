@@ -137,7 +137,7 @@ def parse_args():
     # Memory buffer arguments
     parser.add_argument('--buffer_size', type=int, default=2000,
                        help='Total memory buffer size')
-    parser.add_argument('--samples_per_class', type=int, default=20,
+    parser.add_argument('--samples_per_class', type=int, default=100,
                        help='Samples per class in buffer')
     parser.add_argument('--selection_strategy', type=str, default='herding',
                        choices=['random', 'herding', 'uncertainty'],
@@ -458,7 +458,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
                 torch.cuda.empty_cache()
 
             print(f"task_{i}: Eval Acc: {acc*100:.3f} Eval Prec: {prec*100:.3f}")
-            
+
         task_accuracies[task_idx] = current_results
         
         # MEMORY MANAGEMENT: Clear dataset cache after evaluation

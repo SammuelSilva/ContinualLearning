@@ -356,11 +356,7 @@ class EnhancedContinualCIFAR100:
         if not self.use_unknown_data:
             return 0.0
         
-        if task_id == 0:
-            return self.unknown_ratio
-        else:
-            decayed_ratio = self.unknown_ratio * (self.unknown_ratio_decay ** task_id)
-            return max(decayed_ratio, 0.05)
+        return self.unknown_ratio
     
     def get_task_dataset(
         self,
