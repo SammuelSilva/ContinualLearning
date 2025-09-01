@@ -414,12 +414,13 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             )
             
             if ood_metrics:
+                overall_imp = 0
                 for i in range(0, task_idx):
                     improvement = ood_metrics[f"task_{i}"].get('final_accuracy', 0) - ood_metrics[f"task_{i}"].get('initial_accuracy', 0)
                     print(f"OOD Alignment completed task_{i}: {improvement:.2f}% improvement in unknown detection")
                     overall_imp += improvement        
-            print(f"Overall unknown detection improvement after OOD Alignment: {overall_imp:.2f}%")
-            
+                print(f"Overall unknown detection improvement after OOD Alignment: {overall_imp:.2f}%")
+
         # MEMORY MANAGEMENT: Clear cache after buffer update
         dataset.clear_cache()
         if torch.cuda.is_available():
