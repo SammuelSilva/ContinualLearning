@@ -794,7 +794,7 @@ class HierarchicalTrainer:
                 if stats['misrouted_conf']:
                     print(f"    • Misrouted Confidence:")
                     for wrong_task, conf in sorted(stats['misrouted_conf'].items()):
-                        print(f"      - {wrong_task}: {conf:.2f}")
+                        print(f"      - {wrong_task}: {conf}")
 
             print(f"{'='*60}\n")
             
@@ -844,7 +844,7 @@ class HierarchicalTrainer:
             return {}
         
         print(f"\n{'='*60}")
-        print(f"OOD ALIGNMENT PHASE FOR TASK")
+        print(f"OOD ALIGNMENT PHASE UP TO TASK {task_idx}")
         print(f"{'='*60}")
         
         # Get all memory buffer data
@@ -856,8 +856,9 @@ class HierarchicalTrainer:
             print("No samples in memory buffer for OOD alignment")
             return {}
         
-        for tid in range(0, task_idx):
+        for tid in range(0, task_idx + 1):
             task_id = f"task_{tid}"
+            # Focus on the current task's unknown detection
             # Create binary labels for current task vs others
             unknown_labels = torch.tensor(
                 [0 if tid == task_id else 1 for tid in all_task_ids],
@@ -874,22 +875,19 @@ class HierarchicalTrainer:
                 print(f"No samples for task {task_id} found in memory buffer")
                 return {}
             
-            # Get only the unknown head parameters for this task
-            unknown_head_params = []
+            # Get the task head parameters (includes both classification and unknown detection)
+            task_head_params = []
             if hasattr(self.model, 'task_heads') and task_id in self.model.task_heads:
                 task_head = self.model.task_heads[task_id]
-                if hasattr(task_head, 'unknown_head'):
-                    unknown_head_params.extend(task_head.unknown_head.parameters())
-                elif hasattr(task_head, 'unknown_classifier'):
-                    unknown_head_params.extend(task_head.unknown_classifier.parameters())
+                task_head_params.extend(task_head.parameters())
             
-            if not unknown_head_params:
-                print(f"No unknown head found for task {task_id}")
+            if not task_head_params:
+                print(f"No task head found for task {task_id}")
                 return {}
             
-            # Setup optimizer for unknown head only
+            # Setup optimizer for task head (which includes unknown detection)
             optimizer = torch.optim.AdamW(
-                unknown_head_params,
+                task_head_params,
                 lr=self.ood_alignment_lr,
                 weight_decay=self.weight_decay * 0.1  # Reduced weight decay
             )
@@ -911,11 +909,11 @@ class HierarchicalTrainer:
             initial_acc, initial_loss = self._evaluate_ood_alignment(
                 task_id, all_images, unknown_labels, batch_size
             )
-            alignment_metrics['initial_accuracy'] = initial_acc
-            alignment_metrics['initial_loss'] = initial_loss
-            
-            print(f"Initial unknown detection accuracy: {initial_acc:.2f}%, loss: {initial_loss:.4f}")
-            
+            alignment_metrics[task_id]['initial_accuracy'] = initial_acc
+            alignment_metrics[task_id]['initial_loss'] = initial_loss
+
+            print(f"Initial unknown detection accuracy {task_id}: {initial_acc:.2f}%, loss: {initial_loss:.4f}")
+
             # Training epochs
             for epoch in range(self.ood_alignment_epochs):
                 epoch_loss = 0.0
@@ -944,13 +942,14 @@ class HierarchicalTrainer:
                         # Get features from backbone (no gradients needed)
                         features = self.model(batch_images, task_id=task_id, return_features=True)
                     
-                    # Only compute unknown scores (with gradients for unknown head)
-                    if hasattr(self.model.task_heads[task_id], 'unknown_head'):
-                        unknown_scores = self.model.task_heads[task_id].unknown_head(features)
-                    elif hasattr(self.model.task_heads[task_id], 'unknown_classifier'):
-                        unknown_scores = self.model.task_heads[task_id].unknown_classifier(features)
+                    # Get task head output (includes both classification and unknown scores)
+                    task_logits = self.model.task_heads[task_id](features)
+                    
+                    # Extract unknown scores (last column)
+                    if task_logits.size(1) > self.model.task_classes[task_id]:
+                        unknown_scores = task_logits[:, -1]  # Unknown score is last column
                     else:
-                        print(f"Unknown head not found in task {task_id}")
+                        print(f"Task head for {task_id} doesn't include unknown class")
                         break
                     
                     # Compute binary cross-entropy loss
@@ -962,7 +961,7 @@ class HierarchicalTrainer:
                     
                     # Backward pass
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(unknown_head_params, 1.0)
+                    torch.nn.utils.clip_grad_norm_(task_head_params, 1.0)
                     optimizer.step()
                     
                     # Update metrics
@@ -984,14 +983,14 @@ class HierarchicalTrainer:
                 avg_epoch_loss = epoch_loss / num_batches
                 
                 print(f"Epoch {epoch+1}: Loss = {avg_epoch_loss:.4f}, Accuracy = {epoch_accuracy:.2f}%")
-        
+            
             # Evaluate final performance
             final_acc, final_loss = self._evaluate_ood_alignment(
                 task_id, all_images, unknown_labels, batch_size
             )
-            alignment_metrics['final_accuracy'] = final_acc
-            alignment_metrics['final_loss'] = final_loss
-            
+            alignment_metrics[task_id]['final_accuracy'] = final_acc
+            alignment_metrics[task_id]['final_loss'] = final_loss
+
             improvement = final_acc - initial_acc
             print(f"\nOOD Alignment Results for {task_id}:")
             print(f"  • Initial Accuracy: {initial_acc:.2f}%")
@@ -999,8 +998,8 @@ class HierarchicalTrainer:
             print(f"  • Improvement: {improvement:+.2f}%")
             print(f"  • Final Loss: {final_loss:.4f}")
             print(f"{'='*60}\n")
-            
-            return alignment_metrics
+        
+        return alignment_metrics
         
     def _evaluate_ood_alignment(
         self,
@@ -1033,11 +1032,12 @@ class HierarchicalTrainer:
                 # Get features
                 features = self.model(batch_images, task_id=task_id, return_features=True)
                 
-                # Get unknown scores
-                if hasattr(self.model.task_heads[task_id], 'unknown_head'):
-                    unknown_scores = self.model.task_heads[task_id].unknown_head(features)
-                elif hasattr(self.model.task_heads[task_id], 'unknown_classifier'):
-                    unknown_scores = self.model.task_heads[task_id].unknown_classifier(features)
+                # Get task head output and extract unknown scores
+                task_logits = self.model.task_heads[task_id](features)
+                
+                # Extract unknown scores (last column)
+                if task_logits.size(1) > self.model.task_classes[task_id]:
+                    unknown_scores = task_logits[:, -1]  # Unknown score is last column
                 else:
                     return 0.0, float('inf')
                 

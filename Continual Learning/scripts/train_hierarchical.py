@@ -415,7 +415,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             
             if ood_metrics:
                 overall_imp = 0
-                for i in range(0, task_idx):
+                for i in range(0, task_idx + 1):
                     improvement = ood_metrics[f"task_{i}"].get('final_accuracy', 0) - ood_metrics[f"task_{i}"].get('initial_accuracy', 0)
                     print(f"OOD Alignment completed task_{i}: {improvement:.2f}% improvement in unknown detection")
                     overall_imp += improvement        
