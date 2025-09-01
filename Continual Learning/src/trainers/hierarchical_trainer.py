@@ -402,10 +402,11 @@ class HierarchicalTrainer:
             
             # Scale unknown loss based on task
             unknown_weight = self.lambda_task_unknown * (0.9 ** task_idx)
-            total_loss = total_loss + unknown_weight * unknown_loss
+            total_loss = total_loss + (unknown_loss + unknown_weight * unknown_loss)
         
         # Task-level unknown regularization
         if 'task_unknown_score' in outputs and task_idx > 0:
+            print(f"Computing task-level unknown loss for task {task_id}")
             task_unknown_loss = self._compute_task_unknown_loss(
                 outputs['task_unknown_score'],
                 task_id,
@@ -425,12 +426,7 @@ class HierarchicalTrainer:
             )
             loss_components['block_unknown'] = block_unknown_loss.item()
             total_loss = total_loss + self.lambda_block_unknown * block_unknown_loss
-        
-        # Orthogonality regularization
-        if 'orthogonal_loss' in outputs:
-            loss_components['orthogonal'] = outputs['orthogonal_loss'].item()
-            total_loss = total_loss + 0.1 * outputs['orthogonal_loss']
-        
+                
         return total_loss, loss_components
 
     def _compute_task_unknown_loss(
