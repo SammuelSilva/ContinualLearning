@@ -47,6 +47,7 @@ class HierarchicalTrainer:
         self.num_tasks = num_tasks
         self.ood_alignment_lr = ood_alignment_lr
         self.ood_alignment_epochs = ood_alignment_epochs
+        self.enable_ood_alignment = True  # Enable OOD alignment by default
         
         self.logger = logging.getLogger(__name__)
         
@@ -134,6 +135,19 @@ class HierarchicalTrainer:
                 if patience_counter >= patience and epoch > warmup_epochs:
                     print(f"Early stopping at epoch {epoch+1}")
                     break
+        
+        # OOD Alignment Phase (if enabled and not the first task)
+        if self.enable_ood_alignment and task_idx > 0:
+            print(f"\n🔄 Starting OOD Alignment for {task_id}...")
+            ood_metrics = self.ood_alignment_phase(
+                task_id=task_id,
+                task_idx=task_idx,
+                batch_size=64
+            )
+            
+            if ood_metrics:
+                improvement = ood_metrics.get('final_accuracy', 0) - ood_metrics.get('initial_accuracy', 0)
+                print(f"OOD Alignment completed: {improvement:+.2f}% improvement in unknown detection")
         
         return best_val_acc
     
