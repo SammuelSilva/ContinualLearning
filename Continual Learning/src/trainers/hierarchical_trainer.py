@@ -30,7 +30,9 @@ class HierarchicalTrainer:
         lambda_classification: float = 1.0,
         unknown_temperature: float = 2.0,
         save_dir: str = './checkpoints',
-        num_tasks: int = 10
+        num_tasks: int = 10,
+        ood_alignment_lr: float = 1e-5,
+        ood_alignment_epochs: int = 5
     ):
         self.model = model
         self.memory_buffer = memory_buffer
@@ -43,6 +45,8 @@ class HierarchicalTrainer:
         self.unknown_temperature = unknown_temperature
         self.save_dir = save_dir
         self.num_tasks = num_tasks
+        self.ood_alignment_lr = ood_alignment_lr
+        self.ood_alignment_epochs = ood_alignment_epochs
         
         self.logger = logging.getLogger(__name__)
         
@@ -784,3 +788,301 @@ class HierarchicalTrainer:
                 'routing_stats': routing_stats,
                 'task_accuracies': task_accuracies
             }
+
+    def ood_alignment_phase(
+        self,
+        task_id: str,
+        task_idx: int,
+        batch_size: int = 64
+    ) -> Dict:
+        """
+        OOD Alignment Phase: Retrain only the unknown heads using memory buffer data.
+        
+        For each task's unknown head:
+        - Positive examples (unknown=0): Samples from memory buffer that belong to this task
+        - Negative examples (unknown=1): Samples from memory buffer that DON'T belong to this task
+        
+        Args:
+            task_id: Current task identifier
+            task_idx: Current task index
+            batch_size: Batch size for training
+            
+        Returns:
+            Dictionary with alignment metrics
+        """
+        if self.memory_buffer is None or len(self.memory_buffer) == 0:
+            print("No memory buffer available for OOD alignment")
+            return {}
+        
+        print(f"\n{'='*60}")
+        print(f"OOD ALIGNMENT PHASE FOR TASK {task_id}")
+        print(f"{'='*60}")
+        
+        # Get all memory buffer data
+        memory_data = self.memory_buffer.get_all_data()
+        all_images = memory_data['images'].to(self.device)
+        all_task_ids = memory_data['task_ids']
+        
+        if len(all_images) == 0:
+            print("No samples in memory buffer for OOD alignment")
+            return {}
+        
+        # Create binary labels for current task vs others
+        unknown_labels = torch.tensor(
+            [0 if tid == task_id else 1 for tid in all_task_ids],
+            dtype=torch.float,
+            device=self.device
+        )
+        
+        positive_samples = (unknown_labels == 0).sum().item()
+        negative_samples = (unknown_labels == 1).sum().item()
+        
+        print(f"Training samples: {positive_samples} positive (task {task_id}), {negative_samples} negative (other tasks)")
+        
+        if positive_samples == 0:
+            print(f"No samples for task {task_id} found in memory buffer")
+            return {}
+        
+        # Get only the unknown head parameters for this task
+        unknown_head_params = []
+        if hasattr(self.model, 'task_heads') and task_id in self.model.task_heads:
+            task_head = self.model.task_heads[task_id]
+            if hasattr(task_head, 'unknown_head'):
+                unknown_head_params.extend(task_head.unknown_head.parameters())
+            elif hasattr(task_head, 'unknown_classifier'):
+                unknown_head_params.extend(task_head.unknown_classifier.parameters())
+        
+        if not unknown_head_params:
+            print(f"No unknown head found for task {task_id}")
+            return {}
+        
+        # Setup optimizer for unknown head only
+        optimizer = torch.optim.AdamW(
+            unknown_head_params,
+            lr=self.ood_alignment_lr,
+            weight_decay=self.weight_decay * 0.1  # Reduced weight decay
+        )
+        
+        # Training loop
+        self.model.train()
+        total_samples = len(all_images)
+        
+        alignment_metrics = {
+            'initial_accuracy': 0.0,
+            'final_accuracy': 0.0,
+            'initial_loss': 0.0,
+            'final_loss': 0.0,
+            'positive_samples': positive_samples,
+            'negative_samples': negative_samples
+        }
+        
+        # Evaluate initial performance
+        initial_acc, initial_loss = self._evaluate_ood_alignment(
+            task_id, all_images, unknown_labels, batch_size
+        )
+        alignment_metrics['initial_accuracy'] = initial_acc
+        alignment_metrics['initial_loss'] = initial_loss
+        
+        print(f"Initial unknown detection accuracy: {initial_acc:.2f}%, loss: {initial_loss:.4f}")
+        
+        # Training epochs
+        for epoch in range(self.ood_alignment_epochs):
+            epoch_loss = 0.0
+            correct_predictions = 0
+            total_predictions = 0
+            
+            # Create random indices for batching
+            indices = torch.randperm(total_samples, device=self.device)
+            
+            num_batches = (total_samples + batch_size - 1) // batch_size
+            pbar = tqdm(range(num_batches), desc=f"OOD Alignment Epoch {epoch+1}/{self.ood_alignment_epochs}")
+            
+            for batch_idx in pbar:
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, total_samples)
+                batch_indices = indices[start_idx:end_idx]
+                
+                # Get batch data
+                batch_images = all_images[batch_indices]
+                batch_unknown_labels = unknown_labels[batch_indices]
+                
+                optimizer.zero_grad()
+                
+                # Forward pass - get features and unknown scores
+                with torch.no_grad():
+                    # Get features from backbone (no gradients needed)
+                    features = self.model(batch_images, task_id=task_id, return_features=True)
+                
+                # Only compute unknown scores (with gradients for unknown head)
+                if hasattr(self.model.task_heads[task_id], 'unknown_head'):
+                    unknown_scores = self.model.task_heads[task_id].unknown_head(features)
+                elif hasattr(self.model.task_heads[task_id], 'unknown_classifier'):
+                    unknown_scores = self.model.task_heads[task_id].unknown_classifier(features)
+                else:
+                    print(f"Unknown head not found in task {task_id}")
+                    break
+                
+                # Compute binary cross-entropy loss
+                loss = F.binary_cross_entropy_with_logits(
+                    unknown_scores.squeeze(),
+                    batch_unknown_labels,
+                    pos_weight=torch.tensor([negative_samples / positive_samples]).to(self.device)
+                )
+                
+                # Backward pass
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(unknown_head_params, 1.0)
+                optimizer.step()
+                
+                # Update metrics
+                epoch_loss += loss.item()
+                
+                # Calculate accuracy
+                with torch.no_grad():
+                    predictions = (torch.sigmoid(unknown_scores.squeeze()) > 0.5).float()
+                    correct_predictions += (predictions == batch_unknown_labels).sum().item()
+                    total_predictions += len(batch_unknown_labels)
+                
+                # Update progress bar
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    'acc': f'{100.0 * correct_predictions / total_predictions:.1f}%' if total_predictions > 0 else '0.0%'
+                })
+            
+            epoch_accuracy = 100.0 * correct_predictions / total_predictions if total_predictions > 0 else 0.0
+            avg_epoch_loss = epoch_loss / num_batches
+            
+            print(f"Epoch {epoch+1}: Loss = {avg_epoch_loss:.4f}, Accuracy = {epoch_accuracy:.2f}%")
+        
+        # Evaluate final performance
+        final_acc, final_loss = self._evaluate_ood_alignment(
+            task_id, all_images, unknown_labels, batch_size
+        )
+        alignment_metrics['final_accuracy'] = final_acc
+        alignment_metrics['final_loss'] = final_loss
+        
+        improvement = final_acc - initial_acc
+        print(f"\nOOD Alignment Results for {task_id}:")
+        print(f"  • Initial Accuracy: {initial_acc:.2f}%")
+        print(f"  • Final Accuracy: {final_acc:.2f}%")
+        print(f"  • Improvement: {improvement:+.2f}%")
+        print(f"  • Final Loss: {final_loss:.4f}")
+        print(f"{'='*60}\n")
+        
+        return alignment_metrics
+    
+    def _evaluate_ood_alignment(
+        self,
+        task_id: str,
+        images: torch.Tensor,
+        unknown_labels: torch.Tensor,
+        batch_size: int
+    ) -> Tuple[float, float]:
+        """
+        Evaluate the unknown detection performance during OOD alignment.
+        
+        Returns:
+            Tuple of (accuracy, loss)
+        """
+        self.model.eval()
+        
+        total_loss = 0.0
+        correct_predictions = 0
+        total_predictions = 0
+        num_batches = 0
+        
+        with torch.no_grad():
+            total_samples = len(images)
+            
+            for start_idx in range(0, total_samples, batch_size):
+                end_idx = min(start_idx + batch_size, total_samples)
+                batch_images = images[start_idx:end_idx]
+                batch_unknown_labels = unknown_labels[start_idx:end_idx]
+                
+                # Get features
+                features = self.model(batch_images, task_id=task_id, return_features=True)
+                
+                # Get unknown scores
+                if hasattr(self.model.task_heads[task_id], 'unknown_head'):
+                    unknown_scores = self.model.task_heads[task_id].unknown_head(features)
+                elif hasattr(self.model.task_heads[task_id], 'unknown_classifier'):
+                    unknown_scores = self.model.task_heads[task_id].unknown_classifier(features)
+                else:
+                    return 0.0, float('inf')
+                
+                # Compute loss
+                loss = F.binary_cross_entropy_with_logits(
+                    unknown_scores.squeeze(),
+                    batch_unknown_labels
+                )
+                total_loss += loss.item()
+                
+                # Calculate accuracy
+                predictions = (torch.sigmoid(unknown_scores.squeeze()) > 0.5).float()
+                correct_predictions += (predictions == batch_unknown_labels).sum().item()
+                total_predictions += len(batch_unknown_labels)
+                num_batches += 1
+        
+        accuracy = 100.0 * correct_predictions / total_predictions if total_predictions > 0 else 0.0
+        avg_loss = total_loss / num_batches if num_batches > 0 else float('inf')
+        
+        self.model.train()  # Reset to training mode
+        return accuracy, avg_loss
+    
+    def train_task_with_ood_alignment(
+        self,
+        task_id: str,
+        train_loader: torch.utils.data.DataLoader,
+        val_loader: torch.utils.data.DataLoader,
+        num_epochs: int = 20,
+        patience: int = 5,
+        task_idx: int = 0,
+        warmup_epochs: int = 2,
+        enable_ood_alignment: bool = True,
+        ood_alignment_batch_size: int = 64
+    ) -> Tuple[float, Dict]:
+        """
+        Complete training workflow that includes both main training and OOD alignment phases.
+        
+        Args:
+            task_id: Task identifier
+            train_loader: Training data loader
+            val_loader: Validation data loader
+            num_epochs: Number of epochs for main training
+            patience: Early stopping patience
+            task_idx: Task index
+            warmup_epochs: Warmup epochs for first task
+            enable_ood_alignment: Whether to run OOD alignment phase
+            ood_alignment_batch_size: Batch size for OOD alignment
+            
+        Returns:
+            Tuple of (best_validation_accuracy, ood_alignment_metrics)
+        """
+        
+        # Phase 1: Standard task training
+        print(f"Phase 1: Training task {task_id}")
+        best_val_acc = self.train_task(
+            task_id=task_id,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            num_epochs=num_epochs,
+            patience=patience,
+            task_idx=task_idx,
+            warmup_epochs=warmup_epochs
+        )
+        
+        # Phase 2: OOD Alignment (if enabled and memory buffer available)
+        ood_metrics = {}
+        if enable_ood_alignment and task_idx > 0:  # Skip for first task (no previous tasks in buffer)
+            print(f"Phase 2: OOD Alignment for task {task_id}")
+            ood_metrics = self.ood_alignment_phase(
+                task_id=task_id,
+                task_idx=task_idx,
+                batch_size=ood_alignment_batch_size
+            )
+        elif task_idx == 0:
+            print("Skipping OOD alignment for first task (no previous tasks available)")
+        else:
+            print("OOD alignment disabled or no memory buffer available")
+        
+        return best_val_acc, ood_metrics
