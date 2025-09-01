@@ -103,7 +103,7 @@ def parse_args():
                        help='Use SVHN as unknown/OOD data for training')
     parser.add_argument('--unknown_ratio', type=float, default=0.3,
                        help='Ratio of unknown samples to task samples (for task 0)')
-    parser.add_argument('--unknown_ratio_decay', type=float, default=0.85,
+    parser.add_argument('--unknown_ratio_decay', type=float, default=0.05,
                        help='Decay factor for unknown ratio across tasks')
     parser.add_argument('--include_unknown_test', action='store_true',
                        help='Include unknown samples in test evaluation')
@@ -449,14 +449,16 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             
             # Evaluate immediately and store result
             with torch.no_grad():
-                acc = trainer.evaluate_task(test_loader_i, task_i_id)
+                acc, prec = trainer.evaluate_task(test_loader_i, task_i_id)
                 current_results[task_i_id] = acc
             
             # MEMORY MANAGEMENT: Clear loader from memory
             del test_loader_i
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        
+
+            print(f"task_{i}: Eval Acc: {acc*100:.3f} Eval Prec: {prec*100:.3f}")
+            
         task_accuracies[task_idx] = current_results
         
         # MEMORY MANAGEMENT: Clear dataset cache after evaluation
@@ -518,9 +520,9 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         
         with torch.no_grad():
             if args.use_hierarchical and hasattr(trainer, 'evaluate_hierarchical'):
-                acc = trainer.evaluate_hierarchical({task_i_id: test_loader})[task_i_id]
+                acc, prec = trainer.evaluate_hierarchical({task_i_id: test_loader})[task_i_id]
             else:
-                acc = trainer.evaluate_task(test_loader, task_i_id)
+                acc, prec = trainer.evaluate_task(test_loader, task_i_id)
             final_results[task_i_id] = acc
         
         # MEMORY MANAGEMENT: Clear after each evaluation

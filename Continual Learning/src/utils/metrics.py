@@ -335,7 +335,7 @@ class ContinualMetrics:
         else:
             plt.show()
     
-    def get_summary_string(self) -> str:
+    def get_summary(self) -> str:
         """
         Get a formatted string summary of all metrics.
         """

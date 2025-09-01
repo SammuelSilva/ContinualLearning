@@ -355,7 +355,8 @@ class HierarchicalTrainer:
             self.model.set_gradient_checkpointing(original_state)
         
         accuracy = 100. * correct / total
-        return accuracy
+        precision = 100 * correct/(len(predicted))
+        return accuracy, precision
 
     def _compute_loss(
         self,
@@ -493,13 +494,6 @@ class HierarchicalTrainer:
         unknown_tn = 0
         unknown_fn = 0
         
-        # Determine device
-        #if use_cpu:
-        #    device = torch.device('cpu')
-        #    # Move model to CPU temporarily
-        #    original_device = next(self.model.parameters()).device
-        #    self.model.cpu()
-        #else:
         device = self.device
         original_device = device
         
