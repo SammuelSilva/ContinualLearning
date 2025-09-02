@@ -697,7 +697,10 @@ class HierarchicalTrainer:
                 for pred in task_predicted:
                     if pred != src_task:
                         misrouted_to[pred] = misrouted_to.get(pred, 0) + 1
-                        misrouted_conf[pred] = [task_confidence[task_predicted.index(pred)]]
+                        misrouted_conf[pred] = {
+                            "mistake": task_confidence[task_predicted.index(pred)],
+                            "actual": task_confidence[task_predicted.index(src_task)]
+                        }
                 
                 routing_stats[src_task] = {
                     'routing_accuracy': routing_accuracy,
@@ -724,23 +727,20 @@ class HierarchicalTrainer:
                     
                     task_acc = 100.0 * predicted.eq(correct_labels).sum().item() / len(correct_labels)
                     task_accuracies[src_task] = task_acc
+
+                    logits = self.model(task_samples, task_id=src_task)
+                    if isinstance(logits, dict):
+                        logits = logits['logits']
+                
+                    # Exclude unknown class for accuracy calculation
+                    logits_known = logits[:, :-1]
+                    _, predicted = logits_known.max(1)
+
+                    task_acc = 100.0 * predicted.eq(task_labels).sum().item() / len(task_labels)
+                    task_overall_accuracies[src_task] = task_acc
                 else:
                     task_accuracies[src_task] = 0.0
-            
-            # Calculate classification metrics overall
-            if correctly_routed_mask.sum() > 0:
-                logits = self.model(task_samples, task_id=src_task)
-                if isinstance(logits, dict):
-                    logits = logits['logits']
-            
-                # Exclude unknown class for accuracy calculation
-                logits_known = logits[:, :-1]
-                _, predicted = logits_known.max(1)
-
-                task_acc = 100.0 * predicted.eq(task_labels).sum().item() / len(task_labels)
-                task_overall_accuracies[src_task] = task_acc
-            else:
-                task_overall_accuracies[src_task] = 0.0
+                    task_overall_accuracies[src_task] = 0.0
 
             # Calculate overall metrics
             total_samples = len(images)
@@ -793,8 +793,8 @@ class HierarchicalTrainer:
 
                 if stats['misrouted_conf']:
                     print(f"    • Misrouted Confidence:")
-                    for wrong_task, conf in sorted(stats['misrouted_conf'].items()):
-                        print(f"      - {wrong_task}: {conf}")
+                    for wrong_task in stats['misrouted_conf'].keys():
+                        print(f"      - {wrong_task}: {stats['misrouted_conf'][wrong_task]}")
 
             print(f"{'='*60}\n")
             
