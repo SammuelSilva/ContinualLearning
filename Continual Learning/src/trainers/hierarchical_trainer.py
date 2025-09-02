@@ -851,6 +851,7 @@ class HierarchicalTrainer:
         memory_data = self.memory_buffer.get_all_data()
         all_images = memory_data['images'].to(self.device)
         all_task_ids = memory_data['task_ids']
+        final_alignment_metrics = {}
         
         if len(all_images) == 0:
             print("No samples in memory buffer for OOD alignment")
@@ -896,13 +897,15 @@ class HierarchicalTrainer:
             self.model.train()
             total_samples = len(all_images)
             
-            alignment_metrics = {
-                'initial_accuracy': 0.0,
-                'final_accuracy': 0.0,
-                'initial_loss': 0.0,
-                'final_loss': 0.0,
-                'positive_samples': positive_samples,
-                'negative_samples': negative_samples
+            alignment_metrics = { task_id: 
+                {
+                    'initial_accuracy': 0.0,
+                    'final_accuracy': 0.0,
+                    'initial_loss': 0.0,
+                    'final_loss': 0.0,
+                    'positive_samples': positive_samples,
+                    'negative_samples': negative_samples
+                }
             }
             
             # Evaluate initial performance
@@ -983,23 +986,26 @@ class HierarchicalTrainer:
                 avg_epoch_loss = epoch_loss / num_batches
                 
                 print(f"Epoch {epoch+1}: Loss = {avg_epoch_loss:.4f}, Accuracy = {epoch_accuracy:.2f}%")
-            
-            # Evaluate final performance
-            final_acc, final_loss = self._evaluate_ood_alignment(
-                task_id, all_images, unknown_labels, batch_size
-            )
-            alignment_metrics[task_id]['final_accuracy'] = final_acc
-            alignment_metrics[task_id]['final_loss'] = final_loss
 
-            improvement = final_acc - initial_acc
-            print(f"\nOOD Alignment Results for {task_id}:")
-            print(f"  • Initial Accuracy: {initial_acc:.2f}%")
-            print(f"  • Final Accuracy: {final_acc:.2f}%")
-            print(f"  • Improvement: {improvement:+.2f}%")
-            print(f"  • Final Loss: {final_loss:.4f}")
-            print(f"{'='*60}\n")
+                if epoch == self.ood_alignment_epochs:
+                    # Evaluate final performance
+                    final_acc, final_loss = self._evaluate_ood_alignment(
+                        task_id, all_images, unknown_labels, batch_size
+                    )
+                    alignment_metrics[task_id]['final_accuracy'] = final_acc
+                    alignment_metrics[task_id]['final_loss'] = final_loss
+
+                    improvement = final_acc - initial_acc
+                    print(f"\nOOD Alignment Results for {task_id}:")
+                    print(f"  • Initial Accuracy: {initial_acc:.2f}%")
+                    print(f"  • Final Accuracy: {final_acc:.2f}%")
+                    print(f"  • Improvement: {improvement:+.2f}%")
+                    print(f"  • Final Loss: {final_loss:.4f}")
+                    print(f"{'='*60}\n")
+
+                    final_alignment_metrics.update(alignment_metrics)
         
-        return alignment_metrics
+        return final_alignment_metrics
         
     def _evaluate_ood_alignment(
         self,
