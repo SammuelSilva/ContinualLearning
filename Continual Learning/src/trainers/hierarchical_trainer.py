@@ -667,7 +667,7 @@ class HierarchicalTrainer:
         self.model.eval()
         with torch.no_grad():
             # Get routing predictions
-            predicted_tasks, confidences = self.model.predict_task_id(images)
+            predicted_tasks, confidences, all_scores = self.model.predict_task_id(images)
             
             # Track routing accuracy per task
             routing_stats = {}
@@ -686,6 +686,7 @@ class HierarchicalTrainer:
                 task_labels = labels[task_mask]
                 task_predicted = [predicted_tasks[i] for i, m in enumerate(task_mask) if m]
                 task_confidence = [confidences[i] for i, m in enumerate(task_mask) if m]
+                task_all_scores = [all_scores[i] for i, m in enumerate(task_mask) if m]
 
                 # Calculate routing accuracy for this task
                 correct_routing = sum(1 for pred in task_predicted if pred == src_task)
@@ -696,12 +697,10 @@ class HierarchicalTrainer:
                 misrouted_conf = {}
                 for pred in task_predicted:
                     if pred != src_task:
-                        misrouted_to[pred] = misrouted_to.get(pred, 0) + 1
-                        misrouted_conf[pred] = {
-                            "mistake": task_confidence[task_predicted.index(pred)],
-                            "actual": task_confidence[task_predicted.index(src_task)]
-                        }
-                
+                        miss_pos = misrouted_to.get(pred, 0)
+                        misrouted_conf[pred] = [task_all_scores[val][src_task][miss_pos] for val in task_all_scores.keys()]
+                        misrouted_to[pred] = miss_pos + 1
+
                 routing_stats[src_task] = {
                     'routing_accuracy': routing_accuracy,
                     'total_samples': len(task_predicted),

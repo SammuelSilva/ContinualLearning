@@ -408,21 +408,27 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
             # Route based on highest acceptance score
             predicted_tasks = []
             confidences = []
-            
+            all_values_heads = []
             for i in range(batch_size):
                 best_task = None
                 best_score = -1.0
-                
+                all_task_scores = {}
+                all_task_scores[f"entry_{i}"] = {}
                 for task_id, scores in head_scores.items():
                     score = scores[i].item()
                     if score > best_score:
                         best_score = score
                         best_task = task_id
-                
+                    if all_task_scores[f"entry_{i}"].get(task_id):
+                        all_task_scores[f"entry_{i}"][task_id] += [score]
+                    else:
+                        all_task_scores[f"entry_{i}"][task_id] = [score]
+
                 predicted_tasks.append(best_task)
                 confidences.append(best_score)
+                all_values_heads.append(all_task_scores)
         
-        return predicted_tasks, confidences
+        return predicted_tasks, confidences, all_values_heads
 
     def debug_unknown_class_routing(self, x: torch.Tensor, true_task_ids: List[str] = None):
         """
