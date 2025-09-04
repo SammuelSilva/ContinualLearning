@@ -413,16 +413,15 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                 best_task = None
                 best_score = -1.0
                 all_task_scores = {}
-                all_task_scores[f"entry_{i}"] = {}
                 for task_id, scores in head_scores.items():
                     score = scores[i].item()
                     if score > best_score:
                         best_score = score
                         best_task = task_id
-                    if all_task_scores[f"entry_{i}"].get(task_id):
-                        all_task_scores[f"entry_{i}"][task_id] += [score]
+                    if all_task_scores.get(task_id):
+                        all_task_scores[task_id].update({i: score})
                     else:
-                        all_task_scores[f"entry_{i}"][task_id] = [score]
+                        all_task_scores[task_id] = {i: score}
 
                 predicted_tasks.append(best_task)
                 confidences.append(best_score)
