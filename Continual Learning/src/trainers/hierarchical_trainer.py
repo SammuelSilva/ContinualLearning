@@ -703,7 +703,7 @@ class HierarchicalTrainer:
                 for pos, pred in enumerate(task_predicted):
                     if pred != src_task:
                         miss_pos = misrouted_to.get(pred, 0)
-                        misrouted_conf[pred] = [task_all_scores[src_task][tracker[pos]]]
+                        misrouted_conf[pred] = task_all_scores[tracker[pos]]
                         misrouted_to[pred] = miss_pos + 1
 
                 routing_stats[src_task] = {
