@@ -373,8 +373,10 @@ class EnhancedContinualCIFAR100:
         cache_key = f"{task_id}_{split}_{include_unknown}"
         if self.cache_current_task_only and self._current_task_id == task_id:
             if cache_key in self._current_task_cache:
+                print(f"[DEBUG] Using cached dataset for task {task_id}, split {split}, unknown {include_unknown}")
                 return self._current_task_cache[cache_key]
         elif self.cache_current_task_only and self._current_task_id != task_id:
+            print(f"[DEBUG] Clearing cache for task {self._current_task_id}")
             # Clear previous task cache
             self.clear_cache()
             self._current_task_id = task_id

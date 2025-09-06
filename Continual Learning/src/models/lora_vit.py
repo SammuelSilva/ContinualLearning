@@ -403,8 +403,9 @@ class ContinualLoRAViT(nn.Module):
         self,
         x: torch.Tensor,
         task_id: Optional[str] = None,
-        return_features: bool = False
-    ) -> torch.Tensor:
+        return_features: bool = False,
+        return_unknown_scores: bool = False
+    ):
         """Forward pass through model with LoRA adaptation"""
         
         # Get features with LoRA adaptation
@@ -418,6 +419,19 @@ class ContinualLoRAViT(nn.Module):
             task_id = self.current_task
         
         logits = self.task_heads[task_id](features)
+        
+        if return_unknown_scores:
+            # Calculate task unknown score
+            probs = F.softmax(logits, dim=1)
+            task_unknown_score = probs[:, -1]  # Unknown class probability
+            
+            return {
+                'logits': logits,
+                'unknown_score': task_unknown_score,
+                'task_unknown_score': task_unknown_score,
+                'block_unknown_score': torch.zeros_like(task_unknown_score)  # No blocks in base class
+            }
+        
         return logits
     
     def predict_task_id(self, x: torch.Tensor) -> Tuple[List[str], torch.Tensor]:

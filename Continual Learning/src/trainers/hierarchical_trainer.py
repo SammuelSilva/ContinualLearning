@@ -205,8 +205,8 @@ class HierarchicalTrainer:
             optimizer.zero_grad()
             
             # Forward pass
-            outputs = self.model(images, task_id=task_id)
-            
+            outputs = self.model(images, task_id=task_id, return_features=True, return_unknown_scores=True)
+
             # Handle different output formats
             if isinstance(outputs, torch.Tensor):
                 logits = outputs
@@ -703,7 +703,10 @@ class HierarchicalTrainer:
                 for pos, pred in enumerate(task_predicted):
                     if pred != src_task:
                         miss_pos = misrouted_to.get(pred, 0)
-                        misrouted_conf[pred] = task_all_scores[tracker[pos]]
+                        # Store all scores for this misrouted destination, not just the last one
+                        if pred not in misrouted_conf:
+                            misrouted_conf[pred] = []
+                        misrouted_conf[pred].append(task_all_scores[tracker[pos]])
                         misrouted_to[pred] = miss_pos + 1
 
                 routing_stats[src_task] = {
@@ -796,9 +799,9 @@ class HierarchicalTrainer:
                         print(f"      - {wrong_task}: {count} samples ({percentage:.1f}%)")
 
                 if stats['misrouted_conf']:
-                    print(f"    • Misrouted Confidence:")
-                    for wrong_task in stats['misrouted_conf'].keys():
-                        print(f"      - {wrong_task}: {stats['misrouted_conf'][wrong_task]}")
+                    print(f"    • Misrouted Confidence (all scores):")
+                    for wrong_task, scores_list in stats['misrouted_conf'].items():
+                        print(f"      - {wrong_task}: {scores_list}")
 
             print(f"{'='*60}\n")
             

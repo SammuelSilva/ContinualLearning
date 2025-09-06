@@ -195,7 +195,7 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
             print(f"  ✅ Validation passed. Creating merged block.")
             
             # Create merged block
-            from src.models.hierarchical_lora import IntelligentMergedBlock
+            from src.models.merged_block import IntelligentMergedBlock
             
             block = IntelligentMergedBlock(
                 original_blocks=self.original_blocks,
@@ -314,7 +314,7 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
         return features  # Returns CPU tensor
 
     def forward(self, x: torch.Tensor, task_id: Optional[str] = None, 
-                return_features: bool = False) -> torch.Tensor:
+                return_features: bool = False, return_unknown_scores: bool = False):
         """
         Forward pass for a specific task
         Task can be either a specialist or in a merged block
@@ -331,9 +331,47 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                 features = self._forward_with_block(x, block, task_id)
                 if return_features:
                     return features
-                return block.task_heads[task_id](features)
+                
+                # Get task logits
+                logits = block.task_heads[task_id](features)
+                
+                if return_unknown_scores:
+                    # Calculate unknown scores
+                    probs = F.softmax(logits, dim=1)
+                    task_unknown_score = probs[:, -1]  # Unknown class probability
+                    
+                    # Block-level unknown score
+                    block_unknown_score = 1.0 - block.compute_block_confidence(features)
+                    
+                    # Combined unknown score
+                    unknown_score = (task_unknown_score + block_unknown_score) / 2.0
+                    
+                    return {
+                        'logits': logits,
+                        'unknown_score': unknown_score,
+                        'task_unknown_score': task_unknown_score,
+                        'block_unknown_score': block_unknown_score
+                    }
+                
+                return logits
         
         # Otherwise, use parent's forward for specialist tasks
+        if return_unknown_scores:
+            logits = super().forward(x, task_id, return_features)
+            if return_features:
+                return logits
+            
+            # Calculate task unknown score for specialist
+            probs = F.softmax(logits, dim=1)
+            task_unknown_score = probs[:, -1]  # Unknown class probability
+            
+            return {
+                'logits': logits,
+                'unknown_score': task_unknown_score,
+                'task_unknown_score': task_unknown_score,
+                'block_unknown_score': torch.zeros_like(task_unknown_score)  # No block for specialists
+            }
+        
         return super().forward(x, task_id, return_features)
     
     def _forward_with_block(self, x: torch.Tensor, block, task_id: str) -> torch.Tensor:
