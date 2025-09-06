@@ -949,8 +949,12 @@ class HierarchicalTrainer:
                     
                     # Forward pass - get features and unknown scores
                     with torch.no_grad():
-                        # Get features from backbone (no gradients needed)
-                        features = self.model(batch_images, task_id=task_id, return_features=True)
+                        # Get backbone features (not task head output)
+                        if hasattr(self.model, 'forward_features_with_lora'):
+                            features = self.model.forward_features_with_lora(batch_images, task_id)
+                        else:
+                            # Fallback: get features through forward with return_features=True
+                            features = self.model(batch_images, task_id=task_id, return_features=True)
                     
                     # Get task head output (includes both classification and unknown scores)
                     task_logits = self.model.task_heads[task_id](features)
@@ -1042,8 +1046,12 @@ class HierarchicalTrainer:
                 batch_images = images[start_idx:end_idx]
                 batch_unknown_labels = unknown_labels[start_idx:end_idx]
                 
-                # Get features
-                features = self.model(batch_images, task_id=task_id, return_features=True)
+                # Get backbone features (not task head output)
+                if hasattr(self.model, 'forward_features_with_lora'):
+                    features = self.model.forward_features_with_lora(batch_images, task_id)
+                else:
+                    # Fallback: get features through forward with return_features=True
+                    features = self.model(batch_images, task_id=task_id, return_features=True)
                 
                 # Get task head output and extract unknown scores
                 task_logits = self.model.task_heads[task_id](features)
