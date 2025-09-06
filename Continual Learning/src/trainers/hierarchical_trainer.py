@@ -925,7 +925,7 @@ class HierarchicalTrainer:
 
             print(f"Initial unknown detection accuracy {task_id}: {initial_acc:.2f}%, loss: {initial_loss:.4f}")
 
-            ood_alignment_epochs = self.ood_alignment_epochs if tid != 0 else self.ood_alignment_epochs*2
+            ood_alignment_epochs = self.ood_alignment_epochs if tid != 0 else 20
             # Training epochs
             for epoch in range(ood_alignment_epochs):
                 epoch_loss = 0.0
@@ -936,7 +936,7 @@ class HierarchicalTrainer:
                 indices = torch.randperm(total_samples, device=self.device)
                 
                 num_batches = (total_samples + batch_size - 1) // batch_size
-                pbar = tqdm(range(num_batches), desc=f"OOD Alignment Epoch {epoch+1}/{self.ood_alignment_epochs}")
+                pbar = tqdm(range(num_batches), desc=f"OOD Alignment Epoch {epoch+1}/{ood_alignment_epochs}")
                 
                 for batch_idx in pbar:
                     start_idx = batch_idx * batch_size
