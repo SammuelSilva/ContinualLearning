@@ -1000,23 +1000,22 @@ class HierarchicalTrainer:
                 
                 print(f"Epoch {epoch+1}: Loss = {avg_epoch_loss:.4f}, Accuracy = {epoch_accuracy:.2f}%")
 
-                if epoch == self.ood_alignment_epochs:
-                    # Evaluate final performance
-                    final_acc, final_loss = self._evaluate_ood_alignment(
-                        task_id, all_images, unknown_labels, batch_size
-                    )
-                    alignment_metrics[task_id]['final_accuracy'] = final_acc
-                    alignment_metrics[task_id]['final_loss'] = final_loss
+            # Evaluate final performance after all epochs
+            final_acc, final_loss = self._evaluate_ood_alignment(
+                task_id, all_images, unknown_labels, batch_size
+            )
+            alignment_metrics[task_id]['final_accuracy'] = final_acc
+            alignment_metrics[task_id]['final_loss'] = final_loss
 
-                    improvement = final_acc - initial_acc
-                    print(f"\nOOD Alignment Results for {task_id}:")
-                    print(f"  • Initial Accuracy: {initial_acc:.2f}%")
-                    print(f"  • Final Accuracy: {final_acc:.2f}%")
-                    print(f"  • Improvement: {improvement:+.2f}%")
-                    print(f"  • Final Loss: {final_loss:.4f}")
-                    print(f"{'='*60}\n")
+            improvement = final_acc - initial_acc
+            print(f"\nOOD Alignment Results for {task_id}:")
+            print(f"  • Initial Accuracy: {initial_acc:.2f}%")
+            print(f"  • Final Accuracy: {final_acc:.2f}%")
+            print(f"  • Improvement: {improvement:+.2f}%")
+            print(f"  • Final Loss: {final_loss:.4f}")
+            print(f"{'='*60}\n")
 
-                    final_alignment_metrics.update(alignment_metrics)
+            final_alignment_metrics.update(alignment_metrics)
         
         return final_alignment_metrics
         
