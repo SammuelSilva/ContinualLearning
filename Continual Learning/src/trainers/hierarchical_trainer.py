@@ -696,7 +696,7 @@ class HierarchicalTrainer:
                 misrouted_to = {}
                 misrouted_conf = {}
                 tracker = []
-                for pos, t in enumerate(task_ids_true):
+                for pos, t in enumerate(task_all_scores): 
                     if task_mask[pos]:
                         tracker.append(pos)
 
@@ -706,7 +706,8 @@ class HierarchicalTrainer:
                         # Store all scores for this misrouted destination, not just the last one
                         if pred not in misrouted_conf:
                             misrouted_conf[pred] = []
-                        misrouted_conf[pred].append(task_all_scores[tracker[pos]])
+                        original_idx = tracker[pos] 
+                        misrouted_conf[pred].append(task_all_scores[original_idx])
                         misrouted_to[pred] = miss_pos + 1
 
                 routing_stats[src_task] = {
