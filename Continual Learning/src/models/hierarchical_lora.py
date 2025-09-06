@@ -329,8 +329,6 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
         for block in self.merged_blocks:
             if task_id in block.task_ids:
                 features = self._forward_with_block(x, block, task_id)
-                if return_features:
-                    return features
                 
                 # Get task logits
                 logits = block.task_heads[task_id](features)
@@ -357,9 +355,7 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
         
         # Otherwise, use parent's forward for specialist tasks
         if return_unknown_scores:
-            logits = super().forward(x, task_id, return_features)
-            if return_features:
-                return logits
+            logits = super().forward(x, task_id, return_unknown_scores)
             
             # Calculate task unknown score for specialist
             probs = F.softmax(logits, dim=1)
@@ -372,7 +368,7 @@ class HierarchicalLoRAViT(ContinualLoRAViT):
                 'block_unknown_score': torch.zeros_like(task_unknown_score)  # No block for specialists
             }
         
-        return super().forward(x, task_id, return_features)
+        return super().forward(x, task_id, return_unknown_scores=False)
     
     def _forward_with_block(self, x: torch.Tensor, block, task_id: str) -> torch.Tensor:
         """Forward pass through backbone with merged block's LoRA"""

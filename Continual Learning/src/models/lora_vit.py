@@ -403,17 +403,13 @@ class ContinualLoRAViT(nn.Module):
         self,
         x: torch.Tensor,
         task_id: Optional[str] = None,
-        return_features: bool = False,
         return_unknown_scores: bool = False
     ):
         """Forward pass through model with LoRA adaptation"""
         
         # Get features with LoRA adaptation
         features = self.forward_features_with_lora(x, task_id)
-        
-        if return_features:
-            return features
-        
+    
         # Apply task-specific head
         if task_id is None:
             task_id = self.current_task
