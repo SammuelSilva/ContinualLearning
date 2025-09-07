@@ -18,4 +18,5 @@ python scripts/train_hierarchical.py \
     --trim_percentage 0.3 \
     --max_accuracy_drop 10 \
     --ablation_samples 100 \
+    --batch_size 32 \
     --visualize

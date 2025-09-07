@@ -861,22 +861,21 @@ class HierarchicalTrainer:
         
         for tid in range(0, task_idx + 1):
             task_id = f"task_{tid}"
-            # Focus on the current task's unknown detection
-            # Create binary labels for current task vs others
-            unknown_labels = torch.tensor(
-                [0 if tid == task_id else 1 for tid in all_task_ids],
-                dtype=torch.float,
-                device=self.device
+            
+            # Create balanced training and validation datasets
+            train_images, train_labels, val_images, val_labels = self._create_balanced_ood_dataset(
+                all_images, all_task_ids, task_id, validation_split=0.2
             )
             
-            positive_samples = (unknown_labels == 0).sum().item()
-            negative_samples = (unknown_labels == 1).sum().item()
-            
-            print(f"Training samples: {positive_samples} positive (task {task_id}), {negative_samples} negative (other tasks)")
-            
-            if positive_samples == 0:
+            if len(train_images) == 0:
                 print(f"No samples for task {task_id} found in memory buffer")
-                return {}
+                continue
+            
+            positive_samples = (train_labels == 0).sum().item()
+            negative_samples = (train_labels == 1).sum().item()
+            
+            print(f"Training samples: {positive_samples} positive (task {task_id}), {negative_samples} negative (balanced from other tasks)")
+            print(f"Validation samples: {len(val_images)} total")
             
             # Get the task head parameters (includes both classification and unknown detection)
             task_head_params = []
@@ -910,9 +909,9 @@ class HierarchicalTrainer:
                 }
             }
             
-            # Evaluate initial performance
-            initial_acc, initial_loss = self._evaluate_ood_alignment(
-                task_id, all_images, unknown_labels, batch_size
+            # Evaluate initial performance on validation set
+            initial_acc, initial_loss = self._evaluate_ood_alignment_balanced(
+                task_id, val_images, val_labels, batch_size
             )
             alignment_metrics[task_id]['initial_accuracy'] = initial_acc
             alignment_metrics[task_id]['initial_loss'] = initial_loss
@@ -927,19 +926,20 @@ class HierarchicalTrainer:
                 total_predictions = 0
                 
                 # Create random indices for batching
-                indices = torch.randperm(total_samples, device=self.device)
+                train_samples = len(train_images)
+                indices = torch.randperm(train_samples, device=self.device)
                 
-                num_batches = (total_samples + batch_size - 1) // batch_size
+                num_batches = (train_samples + batch_size - 1) // batch_size
                 pbar = tqdm(range(num_batches), desc=f"OOD Alignment Epoch {epoch+1}/{ood_alignment_epochs}")
                 
                 for batch_idx in pbar:
                     start_idx = batch_idx * batch_size
-                    end_idx = min(start_idx + batch_size, total_samples)
+                    end_idx = min(start_idx + batch_size, train_samples)
                     batch_indices = indices[start_idx:end_idx]
                     
                     # Get batch data
-                    batch_images = all_images[batch_indices]
-                    batch_unknown_labels = unknown_labels[batch_indices]
+                    batch_images = train_images[batch_indices]
+                    batch_unknown_labels = train_labels[batch_indices]
                     
                     optimizer.zero_grad()
                     
@@ -965,7 +965,7 @@ class HierarchicalTrainer:
                     # Compute binary cross-entropy loss
                     loss = F.binary_cross_entropy_with_logits(
                         unknown_scores.squeeze(),
-                        batch_unknown_labels,
+                        batch_unknown_labels.float(),
                         pos_weight=torch.tensor([negative_samples / positive_samples]).to(self.device)
                     )
                     
@@ -994,9 +994,9 @@ class HierarchicalTrainer:
                 
                 print(f"Epoch {epoch+1}: Loss = {avg_epoch_loss:.4f}, Accuracy = {epoch_accuracy:.2f}%")
 
-            # Evaluate final performance after all epochs
-            final_acc, final_loss = self._evaluate_ood_alignment(
-                task_id, all_images, unknown_labels, batch_size
+            # Evaluate final performance on validation set
+            final_acc, final_loss = self._evaluate_ood_alignment_balanced(
+                task_id, val_images, val_labels, batch_size
             )
             alignment_metrics[task_id]['final_accuracy'] = final_acc
             alignment_metrics[task_id]['final_loss'] = final_loss
@@ -1132,3 +1132,148 @@ class HierarchicalTrainer:
             print("OOD alignment disabled or no memory buffer available")
         
         return best_val_acc, ood_metrics
+    
+    def _create_balanced_ood_dataset(
+        self, 
+        all_images: torch.Tensor, 
+        all_task_ids: List[str], 
+        target_task_id: str, 
+        validation_split: float = 0.2,
+        max_samples_per_task: int = 100
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Create balanced training and validation datasets for OOD alignment.
+        
+        Args:
+            all_images: All images from memory buffer
+            all_task_ids: Task IDs for each image
+            target_task_id: The task we're training OOD detection for
+            validation_split: Fraction of data to use for validation
+            max_samples_per_task: Maximum samples to use per task to avoid imbalance
+            
+        Returns:
+            Tuple of (train_images, train_labels, val_images, val_labels)
+        """
+        
+        # Get indices for target task (positive examples)
+        target_indices = [i for i, tid in enumerate(all_task_ids) if tid == target_task_id]
+        
+        # Get indices for other tasks (negative examples) - balanced sampling
+        other_task_ids = list(set(all_task_ids) - {target_task_id})
+        other_indices = []
+        
+        # Sample equally from each other task
+        samples_per_other_task = max_samples_per_task // len(other_task_ids) if other_task_ids else 0
+        
+        for other_task in other_task_ids:
+            task_indices = [i for i, tid in enumerate(all_task_ids) if tid == other_task]
+            # Randomly sample up to samples_per_other_task from this task
+            if len(task_indices) > samples_per_other_task:
+                task_indices = np.random.choice(task_indices, samples_per_other_task, replace=False).tolist()
+            other_indices.extend(task_indices)
+        
+        # Balance positive and negative samples
+        num_positive = len(target_indices)
+        num_negative = len(other_indices)
+        
+        if num_positive == 0:
+            return torch.empty(0, *all_images.shape[1:]), torch.empty(0), torch.empty(0, *all_images.shape[1:]), torch.empty(0)
+        
+        # Balance the dataset
+        if num_negative > num_positive:
+            # Too many negatives, randomly sample to match positives
+            other_indices = np.random.choice(other_indices, num_positive, replace=False).tolist()
+        elif num_positive > num_negative and num_negative > 0:
+            # Too many positives, randomly sample to match negatives
+            target_indices = np.random.choice(target_indices, num_negative, replace=False).tolist()
+        
+        # Combine indices and create labels
+        all_indices = target_indices + other_indices
+        labels = torch.tensor([0] * len(target_indices) + [1] * len(other_indices), dtype=torch.long)
+        
+        # Get images
+        selected_images = all_images[all_indices]
+        
+        # Shuffle the data
+        shuffle_indices = torch.randperm(len(all_indices))
+        selected_images = selected_images[shuffle_indices]
+        labels = labels[shuffle_indices]
+        
+        # Split into train/validation
+        num_samples = len(selected_images)
+        val_size = int(num_samples * validation_split)
+        train_size = num_samples - val_size
+        
+        # Split the data
+        train_images = selected_images[:train_size]
+        train_labels = labels[:train_size]
+        val_images = selected_images[train_size:train_size + val_size]
+        val_labels = labels[train_size:train_size + val_size]
+        
+        return train_images, train_labels, val_images, val_labels
+    
+    def _evaluate_ood_alignment_balanced(
+        self,
+        task_id: str,
+        images: torch.Tensor,
+        labels: torch.Tensor,
+        batch_size: int
+    ) -> Tuple[float, float]:
+        """
+        Evaluate the unknown detection performance on balanced validation data.
+        
+        Returns:
+            Tuple of (accuracy, loss)
+        """
+        self.model.eval()
+        
+        total_loss = 0.0
+        correct_predictions = 0
+        total_predictions = 0
+        num_batches = 0
+        
+        with torch.no_grad():
+            total_samples = len(images)
+            
+            if total_samples == 0:
+                return 0.0, float('inf')
+            
+            for start_idx in range(0, total_samples, batch_size):
+                end_idx = min(start_idx + batch_size, total_samples)
+                batch_images = images[start_idx:end_idx]
+                batch_labels = labels[start_idx:end_idx]
+                
+                # Get backbone features (not task head output)
+                if hasattr(self.model, 'forward_features_with_lora'):
+                    features = self.model.forward_features_with_lora(batch_images, task_id)
+                else:
+                    # Fallback: get features through forward with return_features=True
+                    features = self.model(batch_images, task_id=task_id, return_features=True)
+                
+                # Get task head output and extract unknown scores
+                task_logits = self.model.task_heads[task_id](features)
+                
+                # Extract unknown scores (last column)
+                if task_logits.size(1) > self.model.task_classes[task_id]:
+                    unknown_scores = task_logits[:, -1]  # Unknown score is last column
+                else:
+                    return 0.0, float('inf')
+                
+                # Compute loss
+                loss = F.binary_cross_entropy_with_logits(
+                    unknown_scores.squeeze(),
+                    batch_labels.float()
+                )
+                total_loss += loss.item()
+                
+                # Calculate accuracy
+                predictions = (torch.sigmoid(unknown_scores.squeeze()) > 0.5).float()
+                correct_predictions += (predictions == batch_labels).sum().item()
+                total_predictions += len(batch_labels)
+                num_batches += 1
+        
+        accuracy = 100.0 * correct_predictions / total_predictions if total_predictions > 0 else 0.0
+        avg_loss = total_loss / num_batches if num_batches > 0 else float('inf')
+        
+        self.model.train()  # Reset to training mode
+        return accuracy, avg_loss

@@ -687,17 +687,9 @@ def print_summary(metrics, final_results, args, unknown_metrics=None):
         print(f"  - Dataset: SVHN")
         print(f"  - Initial ratio: {args.unknown_ratio:.1%}")
         print(f"  - Decay factor: {args.unknown_ratio_decay}")
-    
-    print(f"\n{'='*60}")
-    print("METRICS")
-    print(f"{'='*60}")
-    print(f"Average Accuracy:     {metrics['average_accuracy']:.2f}%")
-    print(f"Average Forgetting:   {metrics['average_forgetting']:.2f}%")
-    print(f"Backward Transfer:    {metrics['backward_transfer']:.2f}%")
-    print(f"Forward Transfer:     {metrics['forward_transfer']:.2f}%")
-    print(f"Plasticity:          {metrics['plasticity']:.2f}%")
-    print(f"Stability:           {metrics['stability']:.2f}")
-    
+
+    print(metrics)
+
     # Print unknown detection metrics if available
     if args.use_unknown_data and unknown_metrics:
         print(f"\n{'='*60}")
