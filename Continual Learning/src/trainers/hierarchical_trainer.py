@@ -695,19 +695,13 @@ class HierarchicalTrainer:
                 # Track where samples were misrouted
                 misrouted_to = {}
                 misrouted_conf = {}
-                tracker = []
-                for pos, t in enumerate(task_all_scores): 
-                    if task_mask[pos]:
-                        tracker.append(pos)
-
                 for pos, pred in enumerate(task_predicted):
                     if pred != src_task:
                         miss_pos = misrouted_to.get(pred, 0)
                         # Store all scores for this misrouted destination, not just the last one
                         if pred not in misrouted_conf:
                             misrouted_conf[pred] = []
-                        original_idx = tracker[pos] 
-                        misrouted_conf[pred].append(task_all_scores[original_idx])
+                        misrouted_conf[pred].append(task_all_scores[pos])
                         misrouted_to[pred] = miss_pos + 1
 
                 routing_stats[src_task] = {
