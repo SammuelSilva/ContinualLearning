@@ -927,7 +927,7 @@ class HierarchicalTrainer:
                 
                 # Create random indices for batching
                 train_samples = len(train_images)
-                indices = torch.randperm(train_samples, device=self.device)
+                indices = torch.randperm(train_samples)
                 
                 num_batches = (train_samples + batch_size - 1) // batch_size
                 pbar = tqdm(range(num_batches), desc=f"OOD Alignment Epoch {epoch+1}/{ood_alignment_epochs}")
