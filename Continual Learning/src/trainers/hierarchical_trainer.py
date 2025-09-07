@@ -918,7 +918,7 @@ class HierarchicalTrainer:
 
             print(f"Initial unknown detection accuracy {task_id}: {initial_acc:.2f}%, loss: {initial_loss:.4f}")
 
-            ood_alignment_epochs = self.ood_alignment_epochs if tid != 0 else 20
+            ood_alignment_epochs = self.ood_alignment_epochs
             # Training epochs
             for epoch in range(ood_alignment_epochs):
                 epoch_loss = 0.0
