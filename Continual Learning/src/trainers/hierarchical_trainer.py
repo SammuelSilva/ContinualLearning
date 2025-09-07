@@ -966,7 +966,7 @@ class HierarchicalTrainer:
                     loss = F.binary_cross_entropy_with_logits(
                         unknown_scores.squeeze(),
                         batch_unknown_labels.float(),
-                        pos_weight=torch.tensor([negative_samples / positive_samples]).to(self.device)
+                        pos_weight=torch.tensor([negative_samples / positive_samples])
                     )
                     
                     # Backward pass
