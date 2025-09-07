@@ -938,8 +938,8 @@ class HierarchicalTrainer:
                     batch_indices = indices[start_idx:end_idx]
                     
                     # Get batch data
-                    batch_images = train_images[batch_indices]
-                    batch_unknown_labels = train_labels[batch_indices]
+                    batch_images = train_images[batch_indices].to(self.device)
+                    batch_unknown_labels = train_labels[batch_indices].to(self.device)
                     
                     optimizer.zero_grad()
                     
@@ -966,7 +966,7 @@ class HierarchicalTrainer:
                     loss = F.binary_cross_entropy_with_logits(
                         unknown_scores.squeeze(),
                         batch_unknown_labels.float(),
-                        pos_weight=torch.tensor([negative_samples / positive_samples])
+                        pos_weight=torch.tensor([negative_samples / positive_samples]).to(self.device)
                     )
                     
                     # Backward pass
