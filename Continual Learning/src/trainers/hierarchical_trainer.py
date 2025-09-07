@@ -1241,7 +1241,7 @@ class HierarchicalTrainer:
             for start_idx in range(0, total_samples, batch_size):
                 end_idx = min(start_idx + batch_size, total_samples)
                 batch_images = images[start_idx:end_idx]
-                batch_labels = labels[start_idx:end_idx]
+                batch_labels = labels[start_idx:end_idx].to(self.device)
                 
                 # Get backbone features (not task head output)
                 if hasattr(self.model, 'forward_features_with_lora'):
