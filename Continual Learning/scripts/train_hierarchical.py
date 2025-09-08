@@ -380,10 +380,11 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         # Zero-shot evaluation: Test current task before training on it (for forward transfer)
         if task_idx > 0:
             print(f"Zero-shot evaluation on {task_id} (before training)...")
-            test_loader_zs = dataset.get_task_dataloader(
-                task_id=task_id, 
-                split='test', 
-                batch_size=32, 
+            test_dataset_zs = dataset.get_task_dataset(task_idx, split='test')
+            test_loader_zs = torch.utils.data.DataLoader(
+                test_dataset_zs,
+                batch_size=32,
+                shuffle=False,
                 num_workers=2,
                 pin_memory=False
             )
@@ -395,7 +396,8 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
                 if hasattr(trainer, 'metrics') and trainer.metrics is not None:
                     trainer.metrics.update(task_idx - 1, task_idx, zs_acc)
             
-            del test_loader_zs
+            # Cleanup zero-shot evaluation resources
+            del test_loader_zs, test_dataset_zs
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         
