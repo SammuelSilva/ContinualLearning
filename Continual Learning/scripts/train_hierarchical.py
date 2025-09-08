@@ -638,7 +638,6 @@ def create_final_visualizations(visualizer, model, trainer, args, unknown_metric
         visualizer.create_training_dashboard(
             metrics_history=trainer.metrics.__dict__,
             hierarchy_stats=stats,
-            unknown_metrics=unknown_metrics,
             save_path=os.path.join(save_dir, 'dashboard.html')
         )
     
