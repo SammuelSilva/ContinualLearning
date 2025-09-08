@@ -465,6 +465,10 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             with torch.no_grad():
                 acc, prec = trainer.evaluate_task(test_loader_i, task_i_id)
                 current_results[task_i_id] = acc
+                
+                # Update metrics matrix if available
+                if hasattr(trainer, 'metrics') and trainer.metrics is not None:
+                    trainer.metrics.update(task_idx, i, acc * 100)  # Convert to percentage
             
             # MEMORY MANAGEMENT: Clear loader from memory
             del test_loader_i
@@ -688,7 +692,22 @@ def print_summary(metrics, final_results, args, unknown_metrics=None):
         print(f"  - Initial ratio: {args.unknown_ratio:.1%}")
         print(f"  - Decay factor: {args.unknown_ratio_decay}")
 
-    print(metrics)
+    # Print metrics summary
+    if isinstance(metrics, dict):
+        # Format metrics dict as a readable string
+        print("=" * 50)
+        print("CONTINUAL LEARNING METRICS SUMMARY")
+        print("=" * 50)
+        print(f"Average Accuracy:     {metrics.get('average_accuracy', 0.0):.1f}%")
+        print(f"Average Forgetting:   {metrics.get('average_forgetting', 0.0):.1f}%")
+        print(f"Max Forgetting:       {metrics.get('max_forgetting', 0.0):.1f}%")
+        print(f"Backward Transfer:    {metrics.get('backward_transfer', 0.0):.1f}%")
+        print(f"Forward Transfer:     {metrics.get('forward_transfer', 0.0):.1f}%")
+        print(f"Plasticity:          {metrics.get('plasticity', 0.0):.1f}%")
+        print(f"Stability:           {metrics.get('stability', 0.0):.3f}")
+        print("=" * 50)
+    else:
+        print(metrics)
 
     # Print unknown detection metrics if available
     if args.use_unknown_data and unknown_metrics:

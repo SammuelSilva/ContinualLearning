@@ -619,8 +619,8 @@ class HierarchicalTrainer:
         torch.save(checkpoint, path)
         print(f"Saved checkpoint: {path}")
     
-    def evaluate_all_tasks(self, test_loaders: Dict[str, torch.utils.data.DataLoader]) -> Dict:
-        """Evaluate on all tasks"""
+    def evaluate_all_tasks(self, test_loaders: Dict[str, torch.utils.data.DataLoader], current_task_idx: int) -> Dict:
+        """Evaluate on all tasks and update metrics matrix"""
         results = {}
         
         for task_id, loader in test_loaders.items():
@@ -630,8 +630,9 @@ class HierarchicalTrainer:
             
             # Update metrics tracker if available
             if self.metrics is not None:
-                task_idx = int(task_id.split('_')[1])
-                self.metrics.update(task_idx, task_idx, metrics['accuracy'])
+                task_evaluated_idx = int(task_id.split('_')[1])
+                # Update matrix: after training current_task_idx, accuracy on task_evaluated_idx
+                self.metrics.update(current_task_idx, task_evaluated_idx, metrics['accuracy'])
 
             print(f"Task [{task_id}] Acc:: {metrics['accuracy']}")
         return results
@@ -639,7 +640,7 @@ class HierarchicalTrainer:
     def get_metrics_summary(self) -> Dict:
         """Get comprehensive metrics summary"""
         if self.metrics is not None:
-            return self.metrics.get_summary()
+            return self.metrics.compute_all_metrics()
         else:
             return {}
 
