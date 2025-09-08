@@ -568,11 +568,11 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
     print_summary(final_metrics, final_results, args, unknown_metrics)
     
     # Final visualizations
-    if visualizer:
-        create_final_visualizations(
-            visualizer, model, trainer,
-            args, unknown_metrics
-        )
+    #if visualizer:
+    #    create_final_visualizations(
+    #        visualizer, model, trainer,
+     #       args, unknown_metrics
+     #   )
     
     # MEMORY MANAGEMENT: Final cleanup
     if torch.cuda.is_available():
