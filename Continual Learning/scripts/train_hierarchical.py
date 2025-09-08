@@ -377,6 +377,28 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
         if args.use_hierarchical and hasattr(model, 'set_memory_buffer'):
             model.set_memory_buffer(memory_buffer)
         
+        # Zero-shot evaluation: Test current task before training on it (for forward transfer)
+        if task_idx > 0:
+            print(f"Zero-shot evaluation on {task_id} (before training)...")
+            test_loader_zs = dataset.get_task_dataloader(
+                task_id=task_id, 
+                split='test', 
+                batch_size=32, 
+                num_workers=2,
+                pin_memory=False
+            )
+            with torch.no_grad():
+                zs_acc, _ = trainer.evaluate_task(test_loader_zs, task_id)
+                print(f"Zero-shot accuracy on {task_id}: {zs_acc:.2f}%")
+                
+                # Update metrics matrix with zero-shot result
+                if hasattr(trainer, 'metrics') and trainer.metrics is not None:
+                    trainer.metrics.update(task_idx - 1, task_idx, zs_acc)
+            
+            del test_loader_zs
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
         # Train on current task
         print(f"Training on {task_id}...")
         best_acc = trainer.train_task(
@@ -468,7 +490,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
                 
                 # Update metrics matrix if available
                 if hasattr(trainer, 'metrics') and trainer.metrics is not None:
-                    trainer.metrics.update(task_idx, i, acc * 100)  # Convert to percentage
+                    trainer.metrics.update(task_idx, i, acc)  # acc is already a percentage
             
             # MEMORY MANAGEMENT: Clear loader from memory
             del test_loader_i
@@ -553,6 +575,16 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
     
     # Get comprehensive metrics
     final_metrics = trainer.get_metrics_summary()
+    
+    # Debug: Print accuracy matrix to understand the issue
+    if hasattr(trainer, 'metrics') and trainer.metrics is not None:
+        print("\n=== DEBUG: Accuracy Matrix ===")
+        print("Matrix shape:", trainer.metrics.accuracy_matrix.shape)
+        print("Matrix:")
+        import numpy as np
+        with np.printoptions(precision=1, suppress=True):
+            print(trainer.metrics.accuracy_matrix)
+        print("================================\n")
     
     # Save results
     results = {
