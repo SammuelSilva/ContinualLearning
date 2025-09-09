@@ -350,7 +350,7 @@ class HierarchicalTrainer:
                         # HIERARCHICAL EVALUATION: Route samples first, then classify
                         
                         # Step 1: Route samples to tasks
-                        predicted_tasks, _ = self.model.predict_task_id(sub_images, use_cpu=False)
+                        predicted_tasks, _, _ = self.model.predict_task_id(sub_images, use_cpu=False)
                         
                         # Step 2: Count routing accuracy
                         for j, predicted_task in enumerate(predicted_tasks):
