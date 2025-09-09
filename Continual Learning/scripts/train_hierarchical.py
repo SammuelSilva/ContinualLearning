@@ -385,7 +385,7 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
                 test_dataset_zs,
                 batch_size=32,
                 shuffle=False,
-                num_workers=2,
+                num_workers=min(args.num_workers, 2),
                 pin_memory=False
             )
             with torch.no_grad():
