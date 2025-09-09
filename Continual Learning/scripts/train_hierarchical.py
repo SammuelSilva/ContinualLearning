@@ -389,8 +389,8 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
                 pin_memory=False
             )
             with torch.no_grad():
-                zs_acc, _ = trainer.evaluate_task(test_loader_zs, task_id)
-                print(f"Zero-shot accuracy on {task_id}: {zs_acc:.2f}%")
+                zs_acc, _, zs_routing_acc = trainer.evaluate_task(test_loader_zs, task_id, use_hierarchical_routing=True)
+                print(f"Zero-shot accuracy on {task_id}: {zs_acc:.2f}% (Routing: {zs_routing_acc:.2f}%)")
                 
                 # Update metrics matrix with zero-shot result
                 if hasattr(trainer, 'metrics') and trainer.metrics is not None:
@@ -487,19 +487,20 @@ def run_training(args, model, dataset, trainer, memory_buffer, logger):
             
             # Evaluate immediately and store result
             with torch.no_grad():
-                acc, prec = trainer.evaluate_task(test_loader_i, task_i_id)
+                # Use hierarchical routing evaluation for true accuracy including routing failures
+                acc, prec, routing_acc = trainer.evaluate_task(test_loader_i, task_i_id, use_hierarchical_routing=True)
                 current_results[task_i_id] = acc
                 
                 # Update metrics matrix if available
                 if hasattr(trainer, 'metrics') and trainer.metrics is not None:
-                    trainer.metrics.update(task_idx, i, acc)  # acc is already a percentage
+                    trainer.metrics.update(task_idx, i, acc)  # acc includes routing accuracy now
             
             # MEMORY MANAGEMENT: Clear loader from memory
             del test_loader_i
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            print(f"task_{i}: Eval Acc: {acc*100:.3f} Eval Prec: {prec*100:.3f}")
+            print(f"task_{i}: Overall Acc: {acc:.3f}% | Routing Acc: {routing_acc:.3f}%")
 
         task_accuracies[task_idx] = current_results
         

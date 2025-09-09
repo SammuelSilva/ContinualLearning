@@ -306,9 +306,17 @@ class HierarchicalTrainer:
         
         return total_loss / len(train_loader), metrics
     
-    def evaluate_task(self, test_loader, task_id: str) -> float:
+    def evaluate_task(self, test_loader, task_id: str, use_hierarchical_routing: bool = True) -> float:
         """
-        Replace existing evaluate_task with memory-efficient version
+        Hierarchical evaluation that includes routing accuracy.
+        
+        Args:
+            test_loader: DataLoader for test data
+            task_id: Expected task ID for the samples
+            use_hierarchical_routing: If True, use routing; if False, use direct task_id (for compatibility)
+        
+        Returns:
+            (accuracy, precision, routing_accuracy) if hierarchical, else (accuracy, precision)
         """
         self.model.eval()
         
@@ -317,9 +325,10 @@ class HierarchicalTrainer:
             original_state = self.model.gradient_checkpointing
             self.model.set_gradient_checkpointing(False)
         
-        correct = 0
-        total = 0
-        predicted_lenght = 0
+        total_correct = 0
+        routing_correct = 0
+        classification_correct = 0
+        total_samples = 0
         max_batch_size = 32  # Process in smaller chunks if needed
         
         with torch.no_grad():
@@ -337,33 +346,82 @@ class HierarchicalTrainer:
                     sub_images = images[i:end_idx].to(self.device, non_blocking=True)
                     sub_labels = labels[i:end_idx].to(self.device, non_blocking=True)
                     
-                    # Forward pass
-                    outputs = self.model(sub_images, task_id=task_id)
+                    if use_hierarchical_routing:
+                        # HIERARCHICAL EVALUATION: Route samples first, then classify
+                        
+                        # Step 1: Route samples to tasks
+                        predicted_tasks, _ = self.model.predict_task_id(sub_images, use_cpu=False)
+                        
+                        # Step 2: Count routing accuracy
+                        for j, predicted_task in enumerate(predicted_tasks):
+                            if predicted_task == task_id:
+                                routing_correct += 1
+                                
+                                # Step 3: For correctly routed samples, check classification
+                                single_image = sub_images[j:j+1]
+                                single_label = sub_labels[j:j+1]
+                                
+                                # Forward pass with the routed task
+                                outputs = self.model(single_image, task_id=predicted_task)
+                                
+                                # Handle output format
+                                if isinstance(outputs, torch.Tensor):
+                                    logits = outputs
+                                else:
+                                    logits = outputs['logits']
+                                
+                                # Remove unknown class for accuracy calculation
+                                if logits.size(1) > self.model.task_classes[predicted_task]:
+                                    logits = logits[:, :-1]
+                                
+                                _, predicted_class = logits.max(1)
+                                if predicted_class.eq(single_label).sum().item() > 0:
+                                    classification_correct += 1
+                                    total_correct += 1
+                            
+                            # If routing is wrong, sample is automatically incorrect
+                            # (total_correct is not incremented)
+                        
+                        total_samples += len(predicted_tasks)
                     
-                    # Handle output format
-                    if isinstance(outputs, torch.Tensor):
-                        logits = outputs
                     else:
-                        logits = outputs['logits']
+                        # DIRECT EVALUATION: Use provided task_id (backward compatibility)
+                        outputs = self.model(sub_images, task_id=task_id)
+                        
+                        # Handle output format
+                        if isinstance(outputs, torch.Tensor):
+                            logits = outputs
+                        else:
+                            logits = outputs['logits']
+                        
+                        # Remove unknown class for accuracy calculation
+                        if logits.size(1) > self.model.task_classes[task_id]:
+                            logits = logits[:, :-1]
+                        
+                        _, predicted = logits.max(1)
+                        total_correct += predicted.eq(sub_labels).sum().item()
+                        total_samples += sub_labels.size(0)
+                        routing_correct = total_samples  # All samples are "correctly routed"
+                        classification_correct = total_correct
                     
-                    # Remove unknown class for accuracy calculation
-                    if logits.size(1) > self.model.task_classes[task_id]:
-                        logits = logits[:, :-1]
-                    
-                    _, predicted = logits.max(1)
-                    correct += predicted.eq(sub_labels).sum().item()
-                    total += sub_labels.size(0)
-                    predicted_lenght += len(predicted)
                     # Clear intermediate tensors
-                    del sub_images, sub_labels, logits
+                    del sub_images, sub_labels
         
         # Restore gradient checkpointing state
         if hasattr(self.model, 'set_gradient_checkpointing'):
             self.model.set_gradient_checkpointing(original_state)
         
-        accuracy = 100. * correct / total
-        precision = 100 * correct/predicted_lenght
-        return accuracy, precision
+        # Compute metrics
+        overall_accuracy = 100.0 * total_correct / total_samples if total_samples > 0 else 0.0
+        routing_accuracy = 100.0 * routing_correct / total_samples if total_samples > 0 else 0.0
+        
+        # Classification accuracy among correctly routed samples
+        classification_accuracy = 100.0 * classification_correct / routing_correct if routing_correct > 0 else 0.0
+        
+        if use_hierarchical_routing:
+            return overall_accuracy, overall_accuracy, routing_accuracy  # (accuracy, precision, routing_accuracy)
+        else:
+            return overall_accuracy, overall_accuracy  # (accuracy, precision) - backward compatibility
 
     def _compute_loss(
         self,
